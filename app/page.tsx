@@ -13,11 +13,16 @@ import {
   type StateMetrics,
   type StatePopulation,
 } from "@/lib/metrics";
-import { hamiltonAllocation, seatShareFromVote } from "@/lib/overlays";
+import {
+  hamiltonAllocation,
+  hamiltonThreePartyAllocation,
+  seatShareFromVote,
+} from "@/lib/overlays";
 
 const DEFAULT_TOTAL = 435;
 const DEFAULT_METRIC: MetricKey = "house";
 const DEFAULT_RESPONSIVENESS: "low" | "medium" | "high" = "medium";
+const DEFAULT_INDEPENDENT_SHARE = 0.02;
 
 const parsePartyShares = (value: string | null, states: StatePopulation[]) => {
   const shares: Record<string, number> = {};
@@ -50,9 +55,12 @@ export default function Home() {
 
   const [totalSeats, setTotalSeats] = useState(DEFAULT_TOTAL);
   const [metric, setMetric] = useState<MetricKey>(DEFAULT_METRIC);
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(true);
   const [overlaysEnabled, setOverlaysEnabled] = useState(false);
   const [responsiveness, setResponsiveness] = useState(DEFAULT_RESPONSIVENESS);
+  const [independentShare, setIndependentShare] = useState(
+    DEFAULT_INDEPENDENT_SHARE
+  );
   const [selectedState, setSelectedState] = useState<string | null>(null);
   const [partyShares, setPartyShares] = useState<Record<string, number>>({});
 
@@ -65,18 +73,30 @@ export default function Home() {
       | "medium"
       | "high"
       | null;
+    const queryIndependentShare = Number(searchParams.get("ind"));
 
     if (!Number.isNaN(querySeats) && querySeats >= 435) {
       setTotalSeats(Math.min(1200, querySeats));
     }
-    if (queryMetric && ["house", "houseDelta", "ec", "ecDelta", "ecPerMillion"].includes(queryMetric)) {
+    if (
+      queryMetric &&
+      ["house", "houseDelta", "ec", "ecDelta", "ecPerMillion"].includes(
+        queryMetric
+      )
+    ) {
       setMetric(queryMetric);
     }
     if (queryOverlays) {
       setOverlaysEnabled(queryOverlays === "1");
     }
-    if (queryResponsiveness && ["low", "medium", "high"].includes(queryResponsiveness)) {
+    if (
+      queryResponsiveness &&
+      ["low", "medium", "high"].includes(queryResponsiveness)
+    ) {
       setResponsiveness(queryResponsiveness);
+    }
+    if (!Number.isNaN(queryIndependentShare)) {
+      setIndependentShare(Math.min(0.2, Math.max(0, queryIndependentShare / 100)));
     }
     setPartyShares(parsePartyShares(searchParams.get("partyA"), stateData));
   }, [searchParams, stateData]);
@@ -91,12 +111,21 @@ export default function Home() {
     params.set("metric", metric);
     params.set("overlays", overlaysEnabled ? "1" : "0");
     params.set("resp", responsiveness);
+    params.set("ind", String(Math.round(independentShare * 100)));
     const shareString = serializePartyShares(partyShares);
     if (shareString) {
       params.set("partyA", shareString);
     }
     router.replace(`/?${params.toString()}`, { scroll: false });
-  }, [totalSeats, metric, overlaysEnabled, responsiveness, partyShares, router]);
+  }, [
+    totalSeats,
+    metric,
+    overlaysEnabled,
+    responsiveness,
+    independentShare,
+    partyShares,
+    router,
+  ]);
 
   const baselineSeats = useMemo(() => {
     const populationsByState: Record<string, number> = {};
@@ -132,7 +161,26 @@ export default function Home() {
     return map;
   }, [metrics]);
 
+  const partisanByState = useMemo(() => {
+    const map: Record<
+      string,
+      { democrats: number; republicans: number; independents: number }
+    > = {};
+
+    metrics.forEach((entry) => {
+      const democratsShare = partyShares[entry.abbr] ?? 0.5;
+      map[entry.abbr] = hamiltonThreePartyAllocation(
+        entry.houseSeats,
+        democratsShare,
+        independentShare
+      );
+    });
+
+    return map;
+  }, [metrics, partyShares, independentShare]);
+
   const selectedMetrics = selectedState ? metricsByState[selectedState] : null;
+  const selectedPartisan = selectedState ? partisanByState[selectedState] : null;
 
   const totals = useMemo(() => {
     return metrics.reduce(
@@ -169,8 +217,10 @@ export default function Home() {
   const handleReset = () => {
     setTotalSeats(DEFAULT_TOTAL);
     setMetric(DEFAULT_METRIC);
+    setDarkMode(true);
     setOverlaysEnabled(false);
     setResponsiveness(DEFAULT_RESPONSIVENESS);
+    setIndependentShare(DEFAULT_INDEPENDENT_SHARE);
     setPartyShares(parsePartyShares(null, stateData));
     setSelectedState(null);
   };
@@ -193,12 +243,20 @@ export default function Home() {
           <p className="max-w-3xl text-lg text-slate-600 dark:text-slate-300">
             Adjust the total House size and see how the Method of Equal Proportions
             reshapes state-by-state seats and Electoral College votes. Optional
-            overlays simulate vote-to-seat translations as teaching tools — not
+            overlays simulate vote-to-seat translations as teaching tools, not
             forecasts.
           </p>
         </header>
 
-        <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+        <USMap
+          metricsByState={metricsByState}
+          partisanByState={partisanByState}
+          metric={metric}
+          selectedState={selectedState}
+          onSelectState={setSelectedState}
+        />
+
+        <div className="mt-10 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
           <Controls
             totalSeats={totalSeats}
             onTotalSeatsChange={setTotalSeats}
@@ -222,7 +280,9 @@ export default function Home() {
                   <p className="text-sm text-slate-500 dark:text-slate-400">
                     Population
                   </p>
-                  <p className="text-xl font-semibold">{formatNumber(totals.population)}</p>
+                  <p className="text-xl font-semibold">
+                    {formatNumber(totals.population)}
+                  </p>
                 </div>
                 <div>
                   <p className="text-sm text-slate-500 dark:text-slate-400">House</p>
@@ -265,8 +325,19 @@ export default function Home() {
                         House seats
                       </p>
                       <p className="text-lg font-semibold">
-                        {selectedMetrics.houseSeats} ({selectedMetrics.houseDelta >= 0 ? "+" : ""}
+                        {selectedMetrics.houseSeats} (
+                        {selectedMetrics.houseDelta >= 0 ? "+" : ""}
                         {selectedMetrics.houseDelta} vs 435)
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">
+                        Partisan House split
+                      </p>
+                      <p className="text-lg font-semibold">
+                        D {selectedPartisan?.democrats ?? 0} / R{" "}
+                        {selectedPartisan?.republicans ?? 0} / I{" "}
+                        {selectedPartisan?.independents ?? 0}
                       </p>
                     </div>
                     <div>
@@ -274,7 +345,8 @@ export default function Home() {
                         Electoral College
                       </p>
                       <p className="text-lg font-semibold">
-                        {selectedMetrics.ecVotes} ({selectedMetrics.ecDelta >= 0 ? "+" : ""}
+                        {selectedMetrics.ecVotes} (
+                        {selectedMetrics.ecDelta >= 0 ? "+" : ""}
                         {selectedMetrics.ecDelta})
                       </p>
                     </div>
@@ -308,28 +380,28 @@ export default function Home() {
                   <div className="rounded-xl border border-slate-200 p-4 dark:border-slate-800">
                     <p className="text-sm font-semibold">Proportional (Hamilton)</p>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Seats allocated from statewide Party A share.
+                      Seats allocated from statewide Democratic share.
                     </p>
                     <div className="mt-3 flex justify-between text-sm">
-                      <span>Party A</span>
+                      <span>Democrats</span>
                       <span className="font-semibold">{overlayTotals.partyA}</span>
                     </div>
                     <div className="mt-1 flex justify-between text-sm">
-                      <span>Party B</span>
+                      <span>Republicans</span>
                       <span className="font-semibold">{overlayTotals.partyB}</span>
                     </div>
                   </div>
                   <div className="rounded-xl border border-slate-200 p-4 dark:border-slate-800">
-                    <p className="text-sm font-semibold">Seat–vote curve</p>
+                    <p className="text-sm font-semibold">Seat-vote curve</p>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
                       Vote share adjusted by responsiveness: {responsiveness}.
                     </p>
                     <div className="mt-3 flex justify-between text-sm">
-                      <span>Party A</span>
+                      <span>Democrats</span>
                       <span className="font-semibold">{overlayTotals.partyACurve}</span>
                     </div>
                     <div className="mt-1 flex justify-between text-sm">
-                      <span>Party B</span>
+                      <span>Republicans</span>
                       <span className="font-semibold">{overlayTotals.partyBCurve}</span>
                     </div>
                   </div>
@@ -339,68 +411,91 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="mt-10 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <USMap
-            metricsByState={metricsByState}
-            metric={metric}
-            selectedState={selectedState}
-            onSelectState={setSelectedState}
-          />
+        <div className="mt-10">
           {overlaysEnabled ? (
-            <div className="card">
-              <p className="label">Party A vote share inputs</p>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                Adjust statewide Party A vote share used by overlay models.
-              </p>
-              <div className="mt-4 max-h-[420px] space-y-3 overflow-auto pr-2">
-                {metrics
-                  .filter((entry) => entry.abbr !== "DC")
-                  .map((entry) => (
-                    <div key={entry.abbr} className="space-y-1">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="font-semibold">
-                          {entry.state} ({entry.abbr})
-                        </span>
-                        <span>{Math.round((partyShares[entry.abbr] ?? 0.5) * 100)}%</span>
+            <div className="card space-y-5">
+              <div>
+                <p className="label">Independent baseline</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Applied to every state when deriving D/R/I seat splits.
+                </p>
+                <div className="mt-3 flex items-center gap-4">
+                  <input
+                    aria-label="Independent vote share baseline"
+                    type="range"
+                    min={0}
+                    max={20}
+                    value={Math.round(independentShare * 100)}
+                    onChange={(event) =>
+                      setIndependentShare(Number(event.target.value) / 100)
+                    }
+                    className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 dark:bg-slate-800"
+                  />
+                  <span className="w-12 text-right text-sm font-semibold">
+                    {Math.round(independentShare * 100)}%
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <p className="label">Democratic vote share inputs</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Adjust statewide Democratic vote share used by overlay models.
+                </p>
+                <div className="mt-4 max-h-[420px] space-y-3 overflow-auto pr-2">
+                  {metrics
+                    .filter((entry) => entry.abbr !== "DC")
+                    .map((entry) => (
+                      <div key={entry.abbr} className="space-y-1">
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="font-semibold">
+                            {entry.state} ({entry.abbr})
+                          </span>
+                          <span>
+                            {Math.round((partyShares[entry.abbr] ?? 0.5) * 100)}%
+                          </span>
+                        </div>
+                        <input
+                          aria-label={`Democratic vote share for ${entry.state}`}
+                          type="range"
+                          min={10}
+                          max={90}
+                          value={Math.round((partyShares[entry.abbr] ?? 0.5) * 100)}
+                          onChange={(event) => {
+                            const next = Number(event.target.value) / 100;
+                            setPartyShares((prev) => ({ ...prev, [entry.abbr]: next }));
+                          }}
+                          className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 dark:bg-slate-800"
+                        />
                       </div>
-                      <input
-                        aria-label={`Party A share for ${entry.state}`}
-                        type="range"
-                        min={10}
-                        max={90}
-                        value={Math.round((partyShares[entry.abbr] ?? 0.5) * 100)}
-                        onChange={(event) => {
-                          const next = Number(event.target.value) / 100;
-                          setPartyShares((prev) => ({ ...prev, [entry.abbr]: next }));
-                        }}
-                        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 dark:bg-slate-800"
-                      />
-                    </div>
-                  ))}
+                    ))}
+                </div>
               </div>
             </div>
           ) : (
             <div className="card">
               <p className="label">Simulation overlays</p>
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                Turn on overlays to explore proportional and seat–vote curve
+                Turn on overlays to explore proportional and seat-vote curve
                 simulations.
               </p>
+              <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                Current independent baseline for map partisan splits: {" "}
+                <span className="font-semibold">
+                  {Math.round(independentShare * 100)}%
+                </span>
+              </p>
               <ul className="mt-4 space-y-3 text-sm text-slate-600 dark:text-slate-300">
-                <li>• Proportional-by-statewide-vote overlay (Hamilton method).</li>
-                <li>• Seat–vote curve overlay (low/medium/high responsiveness).</li>
-                <li>• Results are explicitly simulations, not forecasts.</li>
+                <li>- Proportional-by-statewide-vote overlay (Hamilton method).</li>
+                <li>- Seat-vote curve overlay (low/medium/high responsiveness).</li>
+                <li>- Results are explicitly simulations, not forecasts.</li>
               </ul>
             </div>
           )}
         </div>
 
         <div className="mt-10">
-          <StateTable
-            rows={metrics}
-            metric={metric}
-            onSelectState={setSelectedState}
-          />
+          <StateTable rows={metrics} metric={metric} onSelectState={setSelectedState} />
         </div>
       </div>
     </main>

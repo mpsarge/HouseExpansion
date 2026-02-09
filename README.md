@@ -1,6 +1,27 @@
 # House Expansion Lab
 
-House Expansion Lab is a Next.js (App Router) + TypeScript project that lets you explore how changing the size of the U.S. House changes state apportionment and Electoral College votes. The UI updates in real time with a slider and shows state-by-state metrics in a choropleth tile map and sortable table.
+House Expansion Lab is a Next.js (App Router) + TypeScript project that lets you explore how changing the size of the U.S. House changes state apportionment and Electoral College votes. The UI updates in real time with a slider and shows state-by-state metrics in a geographic U.S. map and sortable table.
+
+## Map layers
+
+The map supports layered boundaries:
+
+1. State boundaries (default)
+2. Congressional district borders (optional)
+3. Precinct borders (optional, loaded per selected state)
+
+Configure optional district and precinct overlays with public env vars:
+
+```bash
+NEXT_PUBLIC_DISTRICTS_GEOJSON_URL=https://.../districts.geojson
+NEXT_PUBLIC_PRECINCTS_GEOJSON_TEMPLATE=https://.../precincts/{state}.geojson
+```
+
+Notes:
+
+1. District/precinct sources must be valid GeoJSON (`Feature` or `FeatureCollection`).
+2. `{state}` in precinct template is replaced with state abbreviation (for example `PA`).
+3. Precincts are loaded only after selecting a state on the map.
 
 ## How apportionment works
 
