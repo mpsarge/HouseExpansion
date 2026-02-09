@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Controls, { type MetricKey } from "@/components/Controls";
 import USMap from "@/components/USMap";
@@ -18,11 +18,39 @@ import {
   hamiltonThreePartyAllocation,
   seatShareFromVote,
 } from "@/lib/overlays";
+import {
+  computeHouseSizeByModel,
+  houseModelLabel,
+  type HouseModelKey,
+} from "@/lib/houseModels";
+import { computeHistoricalEcOutcomes } from "@/lib/elections";
 
 const DEFAULT_TOTAL = 435;
 const DEFAULT_METRIC: MetricKey = "house";
 const DEFAULT_RESPONSIVENESS: "low" | "medium" | "high" = "medium";
 const DEFAULT_INDEPENDENT_SHARE = 0.02;
+const DEFAULT_HOUSE_MODEL: HouseModelKey = "manual";
+const POLLING_API_URL = "/api/polls/statewide";
+
+type PollingApiResponse = {
+  generatedAt: string;
+  methodology: string;
+  sourceBaseUrl: string;
+  coverage: number;
+  shares: Record<string, number>;
+  details: Record<
+    string,
+    {
+      share: number;
+      demPct: number;
+      repPct: number;
+      pollster: string;
+      grade: string | null;
+      endDate: string;
+      source: string;
+    }
+  >;
+};
 
 const parsePartyShares = (value: string | null, states: StatePopulation[]) => {
   const shares: Record<string, number> = {};
@@ -54,6 +82,7 @@ export default function Home() {
   const stateData = populations as StatePopulation[];
 
   const [totalSeats, setTotalSeats] = useState(DEFAULT_TOTAL);
+  const [houseModel, setHouseModel] = useState<HouseModelKey>(DEFAULT_HOUSE_MODEL);
   const [metric, setMetric] = useState<MetricKey>(DEFAULT_METRIC);
   const [darkMode, setDarkMode] = useState(true);
   const [overlaysEnabled, setOverlaysEnabled] = useState(false);
@@ -63,9 +92,19 @@ export default function Home() {
   );
   const [selectedState, setSelectedState] = useState<string | null>(null);
   const [partyShares, setPartyShares] = useState<Record<string, number>>({});
+  const [pollingStatus, setPollingStatus] = useState<
+    "idle" | "loading" | "loaded" | "error"
+  >("idle");
+  const [pollingSummary, setPollingSummary] = useState<{
+    coverage: number;
+    generatedAt: string;
+  } | null>(null);
+  const [pollingError, setPollingError] = useState<string | null>(null);
+  const initializedPollingRef = useRef(false);
 
   useEffect(() => {
     const querySeats = Number(searchParams.get("N"));
+    const queryHouseModel = searchParams.get("hm") as HouseModelKey | null;
     const queryMetric = searchParams.get("metric") as MetricKey | null;
     const queryOverlays = searchParams.get("overlays");
     const queryResponsiveness = searchParams.get("resp") as
@@ -77,6 +116,14 @@ export default function Home() {
 
     if (!Number.isNaN(querySeats) && querySeats >= 435) {
       setTotalSeats(Math.min(1200, querySeats));
+    }
+    if (
+      queryHouseModel &&
+      ["manual", "cubeRoot", "proportional500k", "wyomingRule"].includes(
+        queryHouseModel
+      )
+    ) {
+      setHouseModel(queryHouseModel);
     }
     if (
       queryMetric &&
@@ -106,8 +153,17 @@ export default function Home() {
   }, [darkMode]);
 
   useEffect(() => {
+    if (houseModel === "manual") return;
+    const computed = computeHouseSizeByModel(houseModel, stateData, totalSeats);
+    if (computed !== totalSeats) {
+      setTotalSeats(computed);
+    }
+  }, [houseModel, stateData, totalSeats]);
+
+  useEffect(() => {
     const params = new URLSearchParams();
     params.set("N", String(totalSeats));
+    params.set("hm", houseModel);
     params.set("metric", metric);
     params.set("overlays", overlaysEnabled ? "1" : "0");
     params.set("resp", responsiveness);
@@ -119,6 +175,7 @@ export default function Home() {
     router.replace(`/?${params.toString()}`, { scroll: false });
   }, [
     totalSeats,
+    houseModel,
     metric,
     overlaysEnabled,
     responsiveness,
@@ -126,6 +183,48 @@ export default function Home() {
     partyShares,
     router,
   ]);
+
+  const loadPollingShares = useCallback(
+    async (applyToInputs: boolean) => {
+      setPollingStatus("loading");
+      setPollingError(null);
+      try {
+        const response = await fetch(POLLING_API_URL);
+        if (!response.ok) {
+          throw new Error("Failed to fetch statewide polling data");
+        }
+        const payload = (await response.json()) as PollingApiResponse;
+        setPollingSummary({
+          coverage: payload.coverage,
+          generatedAt: payload.generatedAt,
+        });
+        if (applyToInputs) {
+          setPartyShares((prev) => {
+            const next = { ...prev };
+            Object.entries(payload.shares).forEach(([abbr, share]) => {
+              next[abbr] = Math.min(0.9, Math.max(0.1, share));
+            });
+            return next;
+          });
+        }
+        setPollingStatus("loaded");
+      } catch (error) {
+        setPollingStatus("error");
+        setPollingError(
+          error instanceof Error ? error.message : "Polling load failed"
+        );
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (initializedPollingRef.current) return;
+    initializedPollingRef.current = true;
+
+    const hasPartySharesInUrl = Boolean(searchParams.get("partyA"));
+    void loadPollingShares(!hasPartySharesInUrl);
+  }, [loadPollingShares, searchParams]);
 
   const baselineSeats = useMemo(() => {
     const populationsByState: Record<string, number> = {};
@@ -182,6 +281,18 @@ export default function Home() {
   const selectedMetrics = selectedState ? metricsByState[selectedState] : null;
   const selectedPartisan = selectedState ? partisanByState[selectedState] : null;
 
+  const houseBalanceTotals = useMemo(() => {
+    return Object.values(partisanByState).reduce(
+      (acc, entry) => {
+        acc.democrats += entry.democrats;
+        acc.republicans += entry.republicans;
+        acc.independents += entry.independents;
+        return acc;
+      },
+      { democrats: 0, republicans: 0, independents: 0 }
+    );
+  }, [partisanByState]);
+
   const totals = useMemo(() => {
     return metrics.reduce(
       (acc, entry) => {
@@ -214,8 +325,14 @@ export default function Home() {
     return { partyA, partyB, partyACurve, partyBCurve };
   }, [metrics, partyShares, responsiveness]);
 
+  const historicalEcOutcomes = useMemo(
+    () => computeHistoricalEcOutcomes(metricsByState),
+    [metricsByState]
+  );
+
   const handleReset = () => {
     setTotalSeats(DEFAULT_TOTAL);
+    setHouseModel(DEFAULT_HOUSE_MODEL);
     setMetric(DEFAULT_METRIC);
     setDarkMode(true);
     setOverlaysEnabled(false);
@@ -260,6 +377,8 @@ export default function Home() {
           <Controls
             totalSeats={totalSeats}
             onTotalSeatsChange={setTotalSeats}
+            houseModel={houseModel}
+            onHouseModelChange={setHouseModel}
             metric={metric}
             onMetricChange={setMetric}
             darkMode={darkMode}
@@ -292,6 +411,112 @@ export default function Home() {
                   <p className="text-sm text-slate-500 dark:text-slate-400">EC</p>
                   <p className="text-xl font-semibold">{totals.ec}</p>
                 </div>
+              </div>
+            </div>
+
+            <div className="card">
+              <p className="label">House balance simulation</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Uses {houseModelLabel(houseModel)} with the current statewide
+                Democratic-share inputs.
+              </p>
+              <div className="mt-4">
+                <div className="h-5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                  <div className="flex h-full w-full">
+                    <div
+                      className="h-full bg-blue-500"
+                      style={{
+                        width: `${
+                          (houseBalanceTotals.democrats / Math.max(1, totals.house)) * 100
+                        }%`,
+                      }}
+                    />
+                    <div
+                      className="h-full bg-slate-400"
+                      style={{
+                        width: `${
+                          (houseBalanceTotals.independents / Math.max(1, totals.house)) * 100
+                        }%`,
+                      }}
+                    />
+                    <div
+                      className="h-full bg-red-500"
+                      style={{
+                        width: `${
+                          (houseBalanceTotals.republicans / Math.max(1, totals.house)) * 100
+                        }%`,
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
+                  <div className="rounded-lg border border-slate-200 p-2 dark:border-slate-800">
+                    <p className="text-slate-500 dark:text-slate-400">Democrats</p>
+                    <p className="font-semibold text-blue-600 dark:text-blue-400">
+                      {houseBalanceTotals.democrats}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-2 dark:border-slate-800">
+                    <p className="text-slate-500 dark:text-slate-400">Independents</p>
+                    <p className="font-semibold text-slate-700 dark:text-slate-200">
+                      {houseBalanceTotals.independents}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-2 dark:border-slate-800">
+                    <p className="text-slate-500 dark:text-slate-400">Republicans</p>
+                    <p className="font-semibold text-red-600 dark:text-red-400">
+                      {houseBalanceTotals.republicans}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card">
+              <p className="label">Electoral College historical replay</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Applies each state&apos;s real 2016, 2020, and 2024 popular-vote
+                winner to the current EC map. Maine and Nebraska stay split-state.
+              </p>
+              <div className="mt-4 space-y-4">
+                {historicalEcOutcomes.map((outcome) => {
+                  const ecTotal = outcome.democrats + outcome.republicans;
+                  return (
+                    <div key={outcome.year} className="space-y-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <p className="font-semibold">{outcome.year}</p>
+                        <p className="text-slate-500 dark:text-slate-400">
+                          Majority {outcome.majority} | Winner{" "}
+                          {outcome.winner === "D" ? "Democrats" : "Republicans"}
+                        </p>
+                      </div>
+                      <div className="h-4 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                        <div className="flex h-full w-full">
+                          <div
+                            className="h-full bg-blue-500"
+                            style={{
+                              width: `${(outcome.democrats / Math.max(1, ecTotal)) * 100}%`,
+                            }}
+                          />
+                          <div
+                            className="h-full bg-red-500"
+                            style={{
+                              width: `${(outcome.republicans / Math.max(1, ecTotal)) * 100}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="font-semibold text-blue-600 dark:text-blue-400">
+                          D {outcome.democrats}
+                        </span>
+                        <span className="font-semibold text-red-600 dark:text-red-400">
+                          R {outcome.republicans}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
@@ -440,8 +665,32 @@ export default function Home() {
               <div>
                 <p className="label">Democratic vote share inputs</p>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Adjust statewide Democratic vote share used by overlay models.
+                  Auto-filled from latest reputable statewide polling; adjust any
+                  state manually to test scenarios.
                 </p>
+                <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={() => void loadPollingShares(true)}
+                    disabled={pollingStatus === "loading"}
+                  >
+                    {pollingStatus === "loading"
+                      ? "Refreshing polling..."
+                      : "Refresh from latest polls"}
+                  </button>
+                  {pollingStatus === "loaded" && pollingSummary && (
+                    <span>
+                      {pollingSummary.coverage} states updated, last fetch{" "}
+                      {new Date(pollingSummary.generatedAt).toLocaleString()}.
+                    </span>
+                  )}
+                  {pollingStatus === "error" && (
+                    <span className="text-red-600 dark:text-red-400">
+                      Polling fetch failed: {pollingError}
+                    </span>
+                  )}
+                </div>
                 <div className="mt-4 max-h-[420px] space-y-3 overflow-auto pr-2">
                   {metrics
                     .filter((entry) => entry.abbr !== "DC")

@@ -5,6 +5,7 @@ import type { MouseEvent } from "react";
 import * as d3 from "d3";
 import * as topojson from "topojson-client";
 import type { FeatureCollection, Feature, GeoJsonObject } from "geojson";
+import type { GeometryCollection, Topology } from "topojson-specification";
 import type { MetricKey } from "@/components/Controls";
 import type { StateMetrics, StatePopulation } from "@/lib/metrics";
 import populations from "@/data/populations.json";
@@ -32,6 +33,28 @@ type USMapProps = {
   selectedState?: string | null;
   onSelectState: (abbr: string) => void;
 };
+
+type SeatDeltaLabel = {
+  abbr: string;
+  value: string;
+  x: number;
+  y: number;
+  anchorX?: number;
+  anchorY?: number;
+};
+
+const FORCE_CALLOUT_STATES = new Set([
+  "CT",
+  "DC",
+  "DE",
+  "HI",
+  "MA",
+  "MD",
+  "NH",
+  "NJ",
+  "RI",
+  "VT",
+]);
 
 const toFeatureCollection = (geo: GeoJsonObject): FeatureCollection | null => {
   if (geo.type === "FeatureCollection") {
@@ -81,12 +104,14 @@ export default function USMap({
           throw new Error("Failed to load geographic boundaries");
         }
 
-        const atlas = await response.json();
-        const featureCollection = topojson.feature(
-          atlas as unknown as topojson.Topology,
-          (atlas as { objects: { states: topojson.GeometryCollection } }).objects
-            .states
-        ) as FeatureCollection;
+        const atlas = (await response.json()) as Topology<{
+          states: GeometryCollection;
+        }>;
+        const statesGeo = topojson.feature(atlas, atlas.objects.states);
+        const featureCollection = toFeatureCollection(statesGeo);
+        if (!featureCollection) {
+          throw new Error("Unexpected states geometry format");
+        }
 
         const withAbbr = (featureCollection.features as Feature[])
           .map((feature) => {
@@ -229,6 +254,74 @@ export default function USMap({
     const projection = d3.geoAlbersUsa().fitSize([width, height], geo);
     return d3.geoPath().projection(projection);
   }, [geo]);
+  const hasSeatExpansion = useMemo(
+    () => Object.values(metricsByState).some((entry) => entry.houseDelta !== 0),
+    [metricsByState]
+  );
+  const seatDeltaLabels = useMemo(() => {
+    if (!geo || !path || !hasSeatExpansion) return [] as SeatDeltaLabel[];
+
+    const inline: SeatDeltaLabel[] = [];
+    const callouts: SeatDeltaLabel[] = [];
+    const minWidth = 26;
+    const minHeight = 18;
+    const minArea = 520;
+
+    (geo.features as Feature[]).forEach((feature) => {
+      const abbr = (feature.properties as { abbr?: string })?.abbr;
+      if (!abbr) return;
+      const data = metricsByState[abbr];
+      if (!data) return;
+
+      const centroid = path.centroid(feature);
+      if (!Number.isFinite(centroid[0]) || !Number.isFinite(centroid[1])) {
+        return;
+      }
+      const bounds = path.bounds(feature);
+      const featureWidth = bounds[1][0] - bounds[0][0];
+      const featureHeight = bounds[1][1] - bounds[0][1];
+      const featureArea = featureWidth * featureHeight;
+      const value = data.houseDelta > 0 ? `+${data.houseDelta}` : "0";
+      const useCallout =
+        FORCE_CALLOUT_STATES.has(abbr) ||
+        featureWidth < minWidth ||
+        featureHeight < minHeight ||
+        featureArea < minArea;
+
+      if (useCallout) {
+        callouts.push({
+          abbr,
+          value,
+          x: Math.min(width - 20, bounds[1][0] + 16),
+          y: Math.max(16, Math.min(height - 16, centroid[1])),
+          anchorX: centroid[0],
+          anchorY: centroid[1],
+        });
+      } else {
+        inline.push({
+          abbr,
+          value,
+          x: centroid[0],
+          y: centroid[1],
+        });
+      }
+    });
+
+    // Avoid overlapping callouts by enforcing vertical spacing in Y order.
+    const minGap = 18;
+    callouts.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < callouts.length; i += 1) {
+      callouts[i].y = Math.max(callouts[i].y, callouts[i - 1].y + minGap);
+    }
+    for (let i = callouts.length - 2; i >= 0; i -= 1) {
+      callouts[i].y = Math.min(callouts[i].y, callouts[i + 1].y - minGap);
+    }
+    callouts.forEach((label) => {
+      label.y = Math.max(14, Math.min(height - 14, label.y));
+    });
+
+    return [...inline, ...callouts];
+  }, [geo, path, hasSeatExpansion, metricsByState]);
 
   const updateTooltip = (event: MouseEvent<SVGPathElement>) => {
     const bounds = containerRef.current?.getBoundingClientRect();
@@ -381,6 +474,71 @@ export default function USMap({
               vectorEffect="non-scaling-stroke"
             />
           ))}
+
+        {seatDeltaLabels.map((label) => {
+          const isCallout =
+            typeof label.anchorX === "number" && typeof label.anchorY === "number";
+
+          if (!isCallout) {
+            return (
+              <text
+                key={`seat-delta-${label.abbr}`}
+                x={label.x}
+                y={label.y}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                textRendering="geometricPrecision"
+                className="pointer-events-none fill-slate-900 text-[11px] font-semibold dark:fill-slate-100"
+                style={{
+                  paintOrder: "stroke",
+                  stroke: "rgba(248, 250, 252, 0.95)",
+                  strokeWidth: 1.2,
+                  strokeLinejoin: "round",
+                  strokeLinecap: "round",
+                }}
+              >
+                {label.value}
+              </text>
+            );
+          }
+
+          const textWidth = Math.max(18, label.value.length * 8);
+          const boxHeight = 14;
+          const boxX = label.x - textWidth / 2 - 3;
+          const boxY = label.y - boxHeight / 2;
+
+          return (
+            <g key={`seat-delta-${label.abbr}`} className="pointer-events-none">
+              <line
+                x1={label.anchorX}
+                y1={label.anchorY}
+                x2={label.x - textWidth / 2 - 5}
+                y2={label.y}
+                stroke="#475569"
+                strokeWidth={1}
+              />
+              <rect
+                x={boxX}
+                y={boxY}
+                width={textWidth + 6}
+                height={boxHeight}
+                rx={4}
+                fill="rgba(255,255,255,0.95)"
+                stroke="#94a3b8"
+                strokeWidth={1}
+              />
+              <text
+                x={label.x}
+                y={label.y}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                className="fill-slate-900 text-[10px] font-semibold"
+              >
+                {label.value}
+              </text>
+            </g>
+          );
+        })}
       </svg>
 
       {hovered && tooltip && metricsByState[hovered] && (

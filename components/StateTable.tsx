@@ -6,9 +6,9 @@ import { formatNumber } from "@/lib/metrics";
 
 const metricLabels: Record<MetricKey, string> = {
   house: "House",
-  houseDelta: "Δ House",
+  houseDelta: "Delta House",
   ec: "EC",
-  ecDelta: "Δ EC",
+  ecDelta: "Delta EC",
   ecPerMillion: "EC / M",
 };
 
@@ -18,14 +18,22 @@ type StateTableProps = {
   onSelectState: (abbr: string) => void;
 };
 
+const metricValue = (row: StateMetrics, metric: MetricKey) => {
+  if (metric === "house") return row.houseSeats;
+  if (metric === "ec") return row.ecVotes;
+  if (metric === "houseDelta") return row.houseDelta;
+  if (metric === "ecDelta") return row.ecDelta;
+  return row.ecPerMillion;
+};
+
 export default function StateTable({
   rows,
   metric,
   onSelectState,
 }: StateTableProps) {
   const sorted = [...rows].sort((a, b) => {
-    const valueA = a[metric === "house" ? "houseSeats" : metric];
-    const valueB = b[metric === "house" ? "houseSeats" : metric];
+    const valueA = metricValue(a, metric);
+    const valueB = metricValue(b, metric);
     if (valueA === valueB) return a.state.localeCompare(b.state);
     return valueB - valueA;
   });
@@ -45,9 +53,9 @@ export default function StateTable({
               <th className="py-2 pr-4">State</th>
               <th className="py-2 pr-4">Population</th>
               <th className="py-2 pr-4">House</th>
-              <th className="py-2 pr-4">Δ House</th>
+              <th className="py-2 pr-4">Delta House</th>
               <th className="py-2 pr-4">EC</th>
-              <th className="py-2 pr-4">Δ EC</th>
+              <th className="py-2 pr-4">Delta EC</th>
               <th className="py-2 pr-4">EC / M</th>
             </tr>
           </thead>
@@ -66,9 +74,7 @@ export default function StateTable({
                 <td className="py-2 pr-4">{row.houseDelta}</td>
                 <td className="py-2 pr-4">{row.ecVotes}</td>
                 <td className="py-2 pr-4">{row.ecDelta}</td>
-                <td className="py-2 pr-4">
-                  {formatNumber(row.ecPerMillion, 2)}
-                </td>
+                <td className="py-2 pr-4">{formatNumber(row.ecPerMillion, 2)}</td>
               </tr>
             ))}
           </tbody>
@@ -77,3 +83,4 @@ export default function StateTable({
     </div>
   );
 }
+
