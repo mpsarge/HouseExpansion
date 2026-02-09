@@ -19,15 +19,6 @@ const DEFAULT_TOTAL = 435;
 const DEFAULT_METRIC: MetricKey = "house";
 const DEFAULT_RESPONSIVENESS: "low" | "medium" | "high" = "medium";
 
-const useDebouncedValue = <T,>(value: T, delay = 200) => {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const handle = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(handle);
-  }, [value, delay]);
-  return debounced;
-};
-
 const parsePartyShares = (value: string | null, states: StatePopulation[]) => {
   const shares: Record<string, number> = {};
   states.forEach((state) => {
@@ -64,7 +55,6 @@ export default function Home() {
   const [responsiveness, setResponsiveness] = useState(DEFAULT_RESPONSIVENESS);
   const [selectedState, setSelectedState] = useState<string | null>(null);
   const [partyShares, setPartyShares] = useState<Record<string, number>>({});
-  const debouncedSeats = useDebouncedValue(totalSeats, 150);
 
   useEffect(() => {
     const querySeats = Number(searchParams.get("N"));
@@ -125,8 +115,8 @@ export default function Home() {
       .forEach((state) => {
         populationsByState[state.abbr] = state.population;
       });
-    return apportion(populationsByState, debouncedSeats);
-  }, [stateData, debouncedSeats]);
+    return apportion(populationsByState, totalSeats);
+  }, [stateData, totalSeats]);
 
   const metrics = useMemo(() => {
     return stateData.map((state) =>

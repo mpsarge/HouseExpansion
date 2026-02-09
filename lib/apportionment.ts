@@ -9,9 +9,9 @@ export type PriorityEntry = {
 
 const compareEntries = (a: PriorityEntry, b: PriorityEntry) => {
   if (a.priority === b.priority) {
-    return a.state.localeCompare(b.state);
+    return b.state.localeCompare(a.state);
   }
-  return b.priority - a.priority;
+  return a.priority - b.priority;
 };
 
 class MaxHeap {
@@ -41,7 +41,7 @@ class MaxHeap {
     let current = index;
     while (current > 0) {
       const parent = Math.floor((current - 1) / 2);
-      if (compareEntries(this.data[current], this.data[parent]) < 0) {
+      if (compareEntries(this.data[current], this.data[parent]) <= 0) {
         return;
       }
       [this.data[current], this.data[parent]] = [
