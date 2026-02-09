@@ -1,13 +1,15 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import * as d3 from "d3";
 import * as topojson from "topojson-client";
 import type { FeatureCollection, Feature } from "geojson";
 import type { MetricKey } from "@/components/Controls";
-import type { StateMetrics } from "@/lib/metrics";
-import topology from "@/data/us-tile-topo.json";
+import type { StateMetrics, StatePopulation } from "@/lib/metrics";
+import populations from "@/data/populations.json";
+
+const US_ATLAS_STATES_URL = "https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json";
 
 const metricAccessor = (metric: MetricKey, data: StateMetrics) => {
   if (metric === "house") return data.houseSeats;
@@ -31,45 +33,71 @@ export default function USMap({
   onSelectState,
 }: USMapProps) {
   const [hovered, setHovered] = useState<string | null>(null);
-  const [tooltip, setTooltip] = useState<{ x: number; y: number } | null>(
-    null
-  );
+  const [tooltip, setTooltip] = useState<{ x: number; y: number } | null>(null);
+  const [geo, setGeo] = useState<FeatureCollection | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  const geo = useMemo(() => {
-    const featureCollection = topojson.feature(
-      topology as unknown as topojson.Topology,
-      (topology as { objects: { states: topojson.GeometryCollection } }).objects
-        .states
-    ) as FeatureCollection;
-    return featureCollection;
+  const fipsToAbbr = useMemo(() => {
+    const map: Record<string, string> = {};
+    (populations as StatePopulation[]).forEach((state) => {
+      map[state.fips.padStart(2, "0")] = state.abbr;
+    });
+    return map;
   }, []);
 
-  const values = Object.values(metricsByState).map((data) =>
-    metricAccessor(metric, data)
-  );
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const scale = d3
-    .scaleQuantize<string>()
-    .domain([min, max])
-    .range([
-      "#e0e7ff",
-      "#c7d2fe",
-      "#a5b4fc",
-      "#818cf8",
-      "#6366f1",
-      "#4f46e5",
-      "#4338ca",
-    ]);
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadGeo = async () => {
+      try {
+        const response = await fetch(US_ATLAS_STATES_URL);
+        if (!response.ok) {
+          throw new Error("Failed to load geographic boundaries");
+        }
+
+        const atlas = await response.json();
+        const featureCollection = topojson.feature(
+          atlas as unknown as topojson.Topology,
+          (atlas as { objects: { states: topojson.GeometryCollection } }).objects
+            .states
+        ) as FeatureCollection;
+
+        const withAbbr = (featureCollection.features as Feature[])
+          .map((feature) => {
+            const fips = String((feature as { id?: string | number }).id ?? "").padStart(2, "0");
+            const abbr = fipsToAbbr[fips];
+            if (!abbr) return null;
+            return {
+              ...feature,
+              properties: { ...(feature.properties ?? {}), abbr },
+            } as Feature;
+          })
+          .filter((feature): feature is Feature => feature !== null);
+
+        if (!cancelled) {
+          setGeo({ type: "FeatureCollection", features: withAbbr });
+        }
+      } catch {
+        if (!cancelled) {
+          setGeo({ type: "FeatureCollection", features: [] });
+        }
+      }
+    };
+
+    loadGeo();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fipsToAbbr]);
 
   const width = 700;
   const height = 420;
-  const path = d3
-    .geoPath()
-    .projection(
-      d3.geoIdentity().reflectY(true).fitSize([width, height], geo)
-    );
+  const path = useMemo(() => {
+    if (!geo) return null;
+    const projection = d3.geoAlbersUsa().fitSize([width, height], geo);
+    return d3.geoPath().projection(projection);
+  }, [geo]);
 
   const updateTooltip = (event: MouseEvent<SVGPathElement>) => {
     const bounds = containerRef.current?.getBoundingClientRect();
@@ -81,36 +109,51 @@ export default function USMap({
     <div ref={containerRef} className="card relative">
       <div className="flex items-center justify-between">
         <div>
-          <p className="label">Choropleth map</p>
-          <h3 className="text-lg font-semibold">State-by-state metric map</h3>
+          <p className="label">Geographic map</p>
+          <h3 className="text-lg font-semibold">United States by state</h3>
         </div>
         <div className="text-xs text-slate-500 dark:text-slate-400">
-          Tile map (schematic)
+          Click a state to pin details
         </div>
       </div>
+
+      {!geo && (
+        <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
+          Loading geographic boundaries...
+        </p>
+      )}
+
+      {geo && geo.features.length === 0 && (
+        <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
+          Geographic map data could not be loaded in this environment.
+        </p>
+      )}
+
       <svg
         className="mt-4 h-auto w-full"
         viewBox={`0 0 ${width} ${height}`}
         role="img"
         aria-label="Map of the United States by state"
       >
-        {(geo.features as Feature[]).map((feature) => {
+        {(geo?.features as Feature[] | undefined)?.map((feature) => {
+          if (!path) return null;
           const abbr = (feature.properties as { abbr?: string })?.abbr;
           if (!abbr) return null;
           const data = metricsByState[abbr];
           if (!data) return null;
-          const value = metricAccessor(metric, data);
-          const fill = scale(value);
           const isSelected = selectedState === abbr;
           const isHovered = hovered === abbr;
           return (
             <path
               key={abbr}
               d={path(feature) ?? undefined}
-              fill={fill}
-              stroke={isSelected ? "#f97316" : "#0f172a"}
-              strokeWidth={isSelected ? 3 : 1}
-              className="cursor-pointer transition-all"
+              stroke={isSelected ? "#f97316" : undefined}
+              strokeWidth={isSelected ? 2.5 : 1}
+              className={`cursor-pointer transition-all ${
+                isSelected || isHovered
+                  ? "fill-sky-200 dark:fill-sky-900/60"
+                  : "fill-slate-200 dark:fill-slate-800"
+              } ${isSelected ? "stroke-orange-400" : "stroke-slate-400 dark:stroke-slate-600"}`}
               tabIndex={0}
               onMouseEnter={(event) => {
                 setHovered(abbr);
@@ -124,11 +167,12 @@ export default function USMap({
               onFocus={() => setHovered(abbr)}
               onBlur={() => setHovered(null)}
               onClick={() => onSelectState(abbr)}
-              aria-label={`${data.state}`}
+              aria-label={data.state}
             />
           );
         })}
       </svg>
+
       {hovered && tooltip && metricsByState[hovered] && (
         <div
           className="pointer-events-none absolute rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100"
@@ -137,9 +181,9 @@ export default function USMap({
           <p className="font-semibold">{metricsByState[hovered].state}</p>
           <p>
             {metric === "house" && "House"}
-            {metric === "houseDelta" && "Δ House"}
+            {metric === "houseDelta" && "Delta House"}
             {metric === "ec" && "EC"}
-            {metric === "ecDelta" && "Δ EC"}
+            {metric === "ecDelta" && "Delta EC"}
             {metric === "ecPerMillion" && "EC / M"}: {" "}
             {metricAccessor(metric, metricsByState[hovered]).toFixed(
               metric === "ecPerMillion" ? 2 : 0
