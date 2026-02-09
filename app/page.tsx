@@ -6,6 +6,7 @@ import Controls, { type MetricKey } from "@/components/Controls";
 import USMap from "@/components/USMap";
 import StateTable from "@/components/StateTable";
 import populations from "@/data/populations.json";
+import { midtermHouseDemShareByYear } from "@/data/midtermHouseDemShare";
 import { apportion } from "@/lib/apportionment";
 import {
   buildStateMetrics,
@@ -23,7 +24,10 @@ import {
   houseModelLabel,
   type HouseModelKey,
 } from "@/lib/houseModels";
-import { computeHistoricalEcOutcomes } from "@/lib/elections";
+import {
+  computeHistoricalEcOutcomes,
+  PRESIDENTIAL_DEM_WINNERS_BY_YEAR,
+} from "@/lib/elections";
 
 const DEFAULT_TOTAL = 435;
 const DEFAULT_METRIC: MetricKey = "house";
@@ -31,6 +35,15 @@ const DEFAULT_RESPONSIVENESS: "low" | "medium" | "high" = "medium";
 const DEFAULT_INDEPENDENT_SHARE = 0.02;
 const DEFAULT_HOUSE_MODEL: HouseModelKey = "manual";
 const POLLING_API_URL = "/api/polls/statewide";
+type VoteShareScenarioKey =
+  | "livePolls"
+  | "pres2024"
+  | "pres2020"
+  | "pres2016"
+  | "house2022"
+  | "house2018"
+  | "house2014";
+const DEFAULT_SCENARIO: VoteShareScenarioKey = "livePolls";
 
 type PollingApiResponse = {
   generatedAt: string;
@@ -63,7 +76,7 @@ const parsePartyShares = (value: string | null, states: StatePopulation[]) => {
     const [abbr, share] = pair.split(":");
     const parsed = Number(share);
     if (abbr && !Number.isNaN(parsed)) {
-      shares[abbr] = Math.min(0.9, Math.max(0.1, parsed));
+      shares[abbr] = clampShare(parsed);
     }
   });
   return shares;
@@ -74,6 +87,44 @@ const serializePartyShares = (shares: Record<string, number>) => {
     .filter(([_, share]) => share !== 0.5)
     .map(([abbr, share]) => `${abbr}:${share.toFixed(2)}`)
     .join(",");
+};
+
+const clampShare = (value: number) => Math.min(1, Math.max(0, value));
+
+const presidentialPresetShares = (
+  year: 2016 | 2020 | 2024,
+  states: StatePopulation[]
+) => {
+  const demWinners = new Set(PRESIDENTIAL_DEM_WINNERS_BY_YEAR[year]);
+  const next: Record<string, number> = {};
+  states.forEach((state) => {
+    if (state.abbr === "ME") {
+      next[state.abbr] = year === 2016 ? 0.52 : 0.54;
+      return;
+    }
+    if (state.abbr === "NE") {
+      next[state.abbr] = year === 2016 ? 0.39 : year === 2020 ? 0.46 : 0.45;
+      return;
+    }
+    next[state.abbr] = demWinners.has(state.abbr) ? 0.58 : 0.42;
+  });
+  return next;
+};
+
+const midtermPresetShares = (
+  year: "2014" | "2018" | "2022",
+  states: StatePopulation[]
+) => {
+  const source = midtermHouseDemShareByYear[year];
+  const next: Record<string, number> = {};
+  states.forEach((state) => {
+    if (state.abbr === "DC") {
+      next[state.abbr] = 0.9;
+      return;
+    }
+    next[state.abbr] = clampShare(source[state.abbr] ?? 0.5);
+  });
+  return next;
 };
 
 export default function Home() {
@@ -92,6 +143,8 @@ export default function Home() {
   );
   const [selectedState, setSelectedState] = useState<string | null>(null);
   const [partyShares, setPartyShares] = useState<Record<string, number>>({});
+  const [voteShareScenario, setVoteShareScenario] =
+    useState<VoteShareScenarioKey>(DEFAULT_SCENARIO);
   const [pollingStatus, setPollingStatus] = useState<
     "idle" | "loading" | "loaded" | "error"
   >("idle");
@@ -107,6 +160,9 @@ export default function Home() {
     const queryHouseModel = searchParams.get("hm") as HouseModelKey | null;
     const queryMetric = searchParams.get("metric") as MetricKey | null;
     const queryOverlays = searchParams.get("overlays");
+    const queryScenario = searchParams.get("scenario") as
+      | VoteShareScenarioKey
+      | null;
     const queryResponsiveness = searchParams.get("resp") as
       | "low"
       | "medium"
@@ -135,6 +191,20 @@ export default function Home() {
     }
     if (queryOverlays) {
       setOverlaysEnabled(queryOverlays === "1");
+    }
+    if (
+      queryScenario &&
+      [
+        "livePolls",
+        "pres2024",
+        "pres2020",
+        "pres2016",
+        "house2022",
+        "house2018",
+        "house2014",
+      ].includes(queryScenario)
+    ) {
+      setVoteShareScenario(queryScenario);
     }
     if (
       queryResponsiveness &&
@@ -166,6 +236,7 @@ export default function Home() {
     params.set("hm", houseModel);
     params.set("metric", metric);
     params.set("overlays", overlaysEnabled ? "1" : "0");
+    params.set("scenario", voteShareScenario);
     params.set("resp", responsiveness);
     params.set("ind", String(Math.round(independentShare * 100)));
     const shareString = serializePartyShares(partyShares);
@@ -178,6 +249,7 @@ export default function Home() {
     houseModel,
     metric,
     overlaysEnabled,
+    voteShareScenario,
     responsiveness,
     independentShare,
     partyShares,
@@ -202,7 +274,7 @@ export default function Home() {
           setPartyShares((prev) => {
             const next = { ...prev };
             Object.entries(payload.shares).forEach(([abbr, share]) => {
-              next[abbr] = Math.min(0.9, Math.max(0.1, share));
+              next[abbr] = clampShare(share);
             });
             return next;
           });
@@ -225,6 +297,35 @@ export default function Home() {
     const hasPartySharesInUrl = Boolean(searchParams.get("partyA"));
     void loadPollingShares(!hasPartySharesInUrl);
   }, [loadPollingShares, searchParams]);
+
+  useEffect(() => {
+    if (!initializedPollingRef.current) return;
+    if (voteShareScenario === "livePolls") {
+      void loadPollingShares(true);
+      return;
+    }
+    if (voteShareScenario === "pres2024") {
+      setPartyShares(presidentialPresetShares(2024, stateData));
+      return;
+    }
+    if (voteShareScenario === "pres2020") {
+      setPartyShares(presidentialPresetShares(2020, stateData));
+      return;
+    }
+    if (voteShareScenario === "pres2016") {
+      setPartyShares(presidentialPresetShares(2016, stateData));
+      return;
+    }
+    if (voteShareScenario === "house2022") {
+      setPartyShares(midtermPresetShares("2022", stateData));
+      return;
+    }
+    if (voteShareScenario === "house2018") {
+      setPartyShares(midtermPresetShares("2018", stateData));
+      return;
+    }
+    setPartyShares(midtermPresetShares("2014", stateData));
+  }, [voteShareScenario, stateData, loadPollingShares]);
 
   const baselineSeats = useMemo(() => {
     const populationsByState: Record<string, number> = {};
@@ -293,6 +394,23 @@ export default function Home() {
     );
   }, [partisanByState]);
 
+  const electoralCounterTotals = useMemo(() => {
+    return metrics.reduce(
+      (acc, entry) => {
+        const share = partyShares[entry.abbr] ?? 0.5;
+        if (share <= 0.46) {
+          acc.republicans += entry.ecVotes;
+        } else if (share >= 0.54) {
+          acc.democrats += entry.ecVotes;
+        } else {
+          acc.tossUp += entry.ecVotes;
+        }
+        return acc;
+      },
+      { democrats: 0, tossUp: 0, republicans: 0 }
+    );
+  }, [metrics, partyShares]);
+
   const totals = useMemo(() => {
     return metrics.reduce(
       (acc, entry) => {
@@ -336,6 +454,7 @@ export default function Home() {
     setMetric(DEFAULT_METRIC);
     setDarkMode(true);
     setOverlaysEnabled(false);
+    setVoteShareScenario(DEFAULT_SCENARIO);
     setResponsiveness(DEFAULT_RESPONSIVENESS);
     setIndependentShare(DEFAULT_INDEPENDENT_SHARE);
     setPartyShares(parsePartyShares(null, stateData));
@@ -470,6 +589,68 @@ export default function Home() {
                     </p>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            <div className="card">
+              <p className="label">Electoral vote counter</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Based on current Democratic vote-share inputs. States in the
+                47-53 range are counted as toss-up.
+              </p>
+              <div className="mt-4">
+                <div className="h-5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                  <div className="flex h-full w-full">
+                    <div
+                      className="h-full bg-blue-500"
+                      style={{
+                        width: `${
+                          (electoralCounterTotals.democrats / Math.max(1, totals.ec)) * 100
+                        }%`,
+                      }}
+                    />
+                    <div
+                      className="h-full bg-slate-300 dark:bg-slate-500"
+                      style={{
+                        width: `${
+                          (electoralCounterTotals.tossUp / Math.max(1, totals.ec)) * 100
+                        }%`,
+                      }}
+                    />
+                    <div
+                      className="h-full bg-red-500"
+                      style={{
+                        width: `${
+                          (electoralCounterTotals.republicans / Math.max(1, totals.ec)) * 100
+                        }%`,
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
+                  <div className="rounded-lg border border-slate-200 p-2 dark:border-slate-800">
+                    <p className="text-slate-500 dark:text-slate-400">Democrats</p>
+                    <p className="font-semibold text-blue-600 dark:text-blue-400">
+                      {electoralCounterTotals.democrats}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-2 dark:border-slate-800">
+                    <p className="text-slate-500 dark:text-slate-400">Toss-up</p>
+                    <p className="font-semibold text-slate-700 dark:text-slate-200">
+                      {electoralCounterTotals.tossUp}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-2 dark:border-slate-800">
+                    <p className="text-slate-500 dark:text-slate-400">Republicans</p>
+                    <p className="font-semibold text-red-600 dark:text-red-400">
+                      {electoralCounterTotals.republicans}
+                    </p>
+                  </div>
+                </div>
+                <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                  Majority threshold: {Math.floor(totals.ec / 2) + 1} electoral
+                  votes.
+                </p>
               </div>
             </div>
 
@@ -669,6 +850,34 @@ export default function Home() {
                   Auto-filled from latest reputable statewide polling; adjust any
                   state manually to test scenarios.
                 </p>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <label className="text-xs text-slate-500 dark:text-slate-400">
+                    Historical view
+                  </label>
+                  <select
+                    value={voteShareScenario}
+                    onChange={(event) =>
+                      setVoteShareScenario(event.target.value as VoteShareScenarioKey)
+                    }
+                    className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  >
+                    <option value="livePolls">Live polling baseline</option>
+                    <option value="pres2024">Presidential 2024</option>
+                    <option value="pres2020">Presidential 2020</option>
+                    <option value="pres2016">Presidential 2016</option>
+                    <option value="house2022">Congressional 2022 (midterm)</option>
+                    <option value="house2018">Congressional 2018 (midterm)</option>
+                    <option value="house2014">Congressional 2014 (midterm)</option>
+                  </select>
+                </div>
+                {voteShareScenario === "house2022" ||
+                voteShareScenario === "house2018" ||
+                voteShareScenario === "house2014" ? (
+                  <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                    Midterm presets use embedded state-level two-party U.S. House
+                    vote shares for the selected year.
+                  </p>
+                ) : null}
                 <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
                   <button
                     type="button"
@@ -708,8 +917,8 @@ export default function Home() {
                         <input
                           aria-label={`Democratic vote share for ${entry.state}`}
                           type="range"
-                          min={10}
-                          max={90}
+                          min={0}
+                          max={100}
                           value={Math.round((partyShares[entry.abbr] ?? 0.5) * 100)}
                           onChange={(event) => {
                             const next = Number(event.target.value) / 100;

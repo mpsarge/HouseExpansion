@@ -120,6 +120,12 @@ const ELECTIONS: Record<ElectionYear, ElectionConfig> = {
   },
 };
 
+export const PRESIDENTIAL_DEM_WINNERS_BY_YEAR: Record<ElectionYear, string[]> = {
+  2016: ELECTIONS[2016].demWinners,
+  2020: ELECTIONS[2020].demWinners,
+  2024: ELECTIONS[2024].demWinners,
+};
+
 const allocateSplitDistrictVotes = (
   districtVotes: number,
   districtDemWins: number,
@@ -185,4 +191,3 @@ export const computeHistoricalEcOutcomes = (
     };
   });
 };
-
