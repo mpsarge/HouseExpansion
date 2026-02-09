@@ -25,6 +25,7 @@ const metricAccessor = (metric: MetricKey, data: StateMetrics) => {
 
 type USMapProps = {
   metricsByState: Record<string, StateMetrics>;
+  democraticShareByState?: Record<string, number>;
   partisanByState?: Record<
     string,
     { democrats: number; republicans: number; independents: number }
@@ -42,6 +43,15 @@ type SeatDeltaLabel = {
   anchorX?: number;
   anchorY?: number;
 };
+
+type PartisanCategory =
+  | "safeR"
+  | "likelyR"
+  | "leanR"
+  | "tossUp"
+  | "leanD"
+  | "likelyD"
+  | "safeD";
 
 const FORCE_CALLOUT_STATES = new Set([
   "CT",
@@ -68,6 +78,7 @@ const toFeatureCollection = (geo: GeoJsonObject): FeatureCollection | null => {
 
 export default function USMap({
   metricsByState,
+  democraticShareByState,
   partisanByState,
   metric,
   selectedState,
@@ -329,6 +340,37 @@ export default function USMap({
     setTooltip({ x: event.clientX - bounds.left, y: event.clientY - bounds.top });
   };
 
+  const categoryForShare = (share: number): PartisanCategory => {
+    const pct = Math.round(Math.max(0, Math.min(1, share)) * 100);
+    if (pct <= 37) return "safeR";
+    if (pct <= 42) return "likelyR";
+    if (pct <= 46) return "leanR";
+    if (pct <= 53) return "tossUp";
+    if (pct <= 56) return "leanD";
+    if (pct <= 60) return "likelyD";
+    return "safeD";
+  };
+
+  const categoryLabel = (category: PartisanCategory) => {
+    if (category === "safeR") return "Safe Republican";
+    if (category === "likelyR") return "Likely Republican";
+    if (category === "leanR") return "Lean Republican";
+    if (category === "tossUp") return "Toss-Up";
+    if (category === "leanD") return "Lean Democratic";
+    if (category === "likelyD") return "Likely Democratic";
+    return "Safe Democratic";
+  };
+
+  const categoryClassName = (category: PartisanCategory) => {
+    if (category === "safeR") return "fill-red-700 dark:fill-red-800";
+    if (category === "likelyR") return "fill-red-600 dark:fill-red-700";
+    if (category === "leanR") return "fill-red-400 dark:fill-red-500";
+    if (category === "tossUp") return "fill-slate-100 dark:fill-slate-900";
+    if (category === "leanD") return "fill-blue-400 dark:fill-blue-500";
+    if (category === "likelyD") return "fill-blue-600 dark:fill-blue-700";
+    return "fill-blue-800 dark:fill-blue-900";
+  };
+
   return (
     <div ref={containerRef} className="card relative">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -372,6 +414,28 @@ export default function USMap({
               </span>
             </label>
           </div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
+            {(
+              [
+                "safeR",
+                "likelyR",
+                "leanR",
+                "tossUp",
+                "leanD",
+                "likelyD",
+                "safeD",
+              ] as PartisanCategory[]
+            ).map((category) => (
+              <div key={category} className="flex items-center gap-2">
+                <span
+                  className={`inline-block h-2.5 w-2.5 rounded-sm border border-slate-300 dark:border-slate-700 ${categoryClassName(
+                    category
+                  )}`}
+                />
+                <span>{categoryLabel(category)}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -414,6 +478,8 @@ export default function USMap({
           if (!abbr) return null;
           const data = metricsByState[abbr];
           if (!data) return null;
+          const demShare = democraticShareByState?.[abbr] ?? 0.5;
+          const category = categoryForShare(demShare);
           const isSelected = selectedState === abbr;
           const isHovered = hovered === abbr;
           return (
@@ -425,7 +491,7 @@ export default function USMap({
               className={`cursor-pointer transition-all ${
                 isSelected || isHovered
                   ? "fill-sky-200 dark:fill-sky-900/60"
-                  : "fill-slate-200 dark:fill-slate-800"
+                  : categoryClassName(category)
               } ${
                 isSelected
                   ? "stroke-orange-400"
@@ -555,6 +621,12 @@ export default function USMap({
             {metric === "ecPerMillion" && "EC / M"}: {" "}
             {metricAccessor(metric, metricsByState[hovered]).toFixed(
               metric === "ecPerMillion" ? 2 : 0
+            )}
+          </p>
+          <p>
+            Category:{" "}
+            {categoryLabel(
+              categoryForShare(democraticShareByState?.[hovered] ?? 0.5)
             )}
           </p>
           {partisanByState?.[hovered] && (

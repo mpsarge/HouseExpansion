@@ -367,6 +367,7 @@ export default function Home() {
 
         <USMap
           metricsByState={metricsByState}
+          democraticShareByState={partyShares}
           partisanByState={partisanByState}
           metric={metric}
           selectedState={selectedState}
