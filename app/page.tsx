@@ -28,6 +28,15 @@ import {
   computeHistoricalEcOutcomes,
   PRESIDENTIAL_DEM_WINNERS_BY_YEAR,
 } from "@/lib/elections";
+import {
+  DEFAULT_PARTIES,
+  DEFAULT_PR_SETTINGS,
+  type DistrictPlan,
+  type PRSettings,
+  type StateVotes,
+} from "@/lib/pr/types";
+import { normalizeShares } from "@/lib/pr/districtPlan";
+import { runHybridPRByState, summarizeNationalPR } from "@/lib/pr/simulate";
 
 const DEFAULT_TOTAL = 435;
 const DEFAULT_RESPONSIVENESS: "low" | "medium" | "high" = "medium";
@@ -39,6 +48,8 @@ const AUTOMATED_HOUSE_MODELS: HouseModelKey[] = [
   "wyomingRule",
 ];
 const POLLING_API_URL = "/api/polls/statewide";
+type ElectionSystemMode = "apportionment" | "hybridPR";
+type PRInputPath = "statewide" | "districtProfiles";
 type VoteShareScenarioKey =
   | "livePolls"
   | "pres2024"
@@ -94,6 +105,21 @@ const serializePartyShares = (shares: Record<string, number>) => {
 };
 
 const clampShare = (value: number) => Math.min(1, Math.max(0, value));
+const clampPercent = (value: number) => Math.min(100, Math.max(0, value));
+
+const parseNumber = (value: string) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+};
+
+const buildDefaultPRVotes = (states: StatePopulation[]) => {
+  const out: Record<string, Record<string, number>> = {};
+  states.forEach((state) => {
+    if (state.abbr === "DC") return;
+    out[state.abbr] = { dem: 0.49, rep: 0.49, ind: 0.02 };
+  });
+  return out;
+};
 
 const presidentialPresetShares = (
   year: 2016 | 2020 | 2024,
@@ -146,6 +172,16 @@ export default function Home() {
   );
   const [selectedState, setSelectedState] = useState<string | null>(null);
   const [partyShares, setPartyShares] = useState<Record<string, number>>({});
+  const [electionSystem, setElectionSystem] =
+    useState<ElectionSystemMode>("apportionment");
+  const [prInputPath, setPrInputPath] = useState<PRInputPath>("statewide");
+  const [prSettings, setPrSettings] = useState<PRSettings>(DEFAULT_PR_SETTINGS);
+  const [nationalSwing, setNationalSwing] = useState(0);
+  const [prStateVotes, setPrStateVotes] = useState<
+    Record<string, Record<string, number>>
+  >({});
+  const [profileStateCode, setProfileStateCode] = useState("CA");
+  const [profileJsonText, setProfileJsonText] = useState("");
   const [voteShareScenario, setVoteShareScenario] =
     useState<VoteShareScenarioKey>(DEFAULT_SCENARIO);
   const [pollingStatus, setPollingStatus] = useState<
@@ -171,6 +207,7 @@ export default function Home() {
       | "high"
       | null;
     const queryIndependentShare = Number(searchParams.get("ind"));
+    const queryElectionSystem = searchParams.get("es") as ElectionSystemMode | null;
 
     if (!Number.isNaN(querySeats) && querySeats >= 435) {
       setTotalSeats(Math.min(1200, querySeats));
@@ -209,8 +246,24 @@ export default function Home() {
     if (!Number.isNaN(queryIndependentShare)) {
       setIndependentShare(Math.min(0.2, Math.max(0, queryIndependentShare / 100)));
     }
+    if (queryElectionSystem && ["apportionment", "hybridPR"].includes(queryElectionSystem)) {
+      setElectionSystem(queryElectionSystem);
+    }
     setPartyShares(parsePartyShares(searchParams.get("partyA"), stateData));
   }, [searchParams, stateData]);
+
+  useEffect(() => {
+    if (Object.keys(prStateVotes).length > 0) return;
+    const seeded = buildDefaultPRVotes(stateData);
+    stateData.forEach((state) => {
+      if (state.abbr === "DC") return;
+      const dem = partyShares[state.abbr] ?? 0.49;
+      const ind = independentShare;
+      const rep = Math.max(0, 1 - dem - ind);
+      seeded[state.abbr] = normalizeShares({ dem, rep, ind }, ["dem", "rep", "ind"]);
+    });
+    setPrStateVotes(seeded);
+  }, [stateData, partyShares, independentShare, prStateVotes]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -232,6 +285,7 @@ export default function Home() {
     params.set("scenario", voteShareScenario);
     params.set("resp", responsiveness);
     params.set("ind", String(Math.round(independentShare * 100)));
+    params.set("es", electionSystem);
     const shareString = serializePartyShares(partyShares);
     if (shareString) {
       params.set("partyA", shareString);
@@ -244,6 +298,7 @@ export default function Home() {
     voteShareScenario,
     responsiveness,
     independentShare,
+    electionSystem,
     partyShares,
     router,
   ]);
@@ -467,14 +522,132 @@ export default function Home() {
     [metricsByState]
   );
 
+  const nonDcStates = useMemo(
+    () => stateData.filter((state) => state.abbr !== "DC"),
+    [stateData]
+  );
+
+  const districtProfileParsed = useMemo(() => {
+    if (prInputPath !== "districtProfiles") {
+      return {
+        overrides: {} as Record<string, DistrictPlan>,
+        error: null as string | null,
+      };
+    }
+    if (!profileJsonText.trim()) {
+      return {
+        overrides: {} as Record<string, DistrictPlan>,
+        error: null as string | null,
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(profileJsonText) as Array<{
+        districtId?: string;
+        seats?: number;
+        dem?: number;
+        rep?: number;
+        ind?: number;
+      }>;
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        throw new Error("Expected a JSON array of district objects.");
+      }
+      const districts = parsed.map((entry, idx) => {
+        const seats = Math.max(1, Math.round(entry.seats ?? prSettings.districtSeatTarget));
+        const shares = normalizeShares(
+          {
+            dem: Math.max(0, entry.dem ?? 0),
+            rep: Math.max(0, entry.rep ?? 0),
+            ind: Math.max(0, entry.ind ?? 0),
+          },
+          ["dem", "rep", "ind"]
+        );
+        return {
+          districtId: entry.districtId?.trim() || `${profileStateCode}-${idx + 1}`,
+          seats,
+          partyShares: shares,
+        };
+      });
+      return {
+        overrides: {
+          [profileStateCode]: { stateCode: profileStateCode, districts },
+        } as Record<string, DistrictPlan>,
+        error: null as string | null,
+      };
+    } catch (error) {
+      return {
+        overrides: {} as Record<string, DistrictPlan>,
+        error:
+          error instanceof Error ? error.message : "Invalid district profile JSON.",
+      };
+    }
+  }, [
+    profileJsonText,
+    profileStateCode,
+    prInputPath,
+    prSettings.districtSeatTarget,
+  ]);
+
+  const prEffectiveVotes = useMemo(() => {
+    const output: Record<string, Record<string, number>> = {};
+    nonDcStates.forEach((state) => {
+      const base = prStateVotes[state.abbr] ?? { dem: 0.49, rep: 0.49, ind: 0.02 };
+      const swung = {
+        dem: Math.max(0, base.dem + nationalSwing),
+        rep: Math.max(0, base.rep - nationalSwing),
+        ind: Math.max(0, base.ind),
+      };
+      output[state.abbr] = normalizeShares(swung, ["dem", "rep", "ind"]);
+    });
+    return output;
+  }, [nonDcStates, prStateVotes, nationalSwing]);
+
+  const prStateSeatMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    metrics.forEach((entry) => {
+      if (entry.abbr === "DC") return;
+      map[entry.abbr] = entry.houseSeats;
+    });
+    return map;
+  }, [metrics]);
+
+  const prStateVoteList = useMemo(() => {
+    return nonDcStates.map((state) => ({
+      stateCode: state.abbr,
+      partyShares: prEffectiveVotes[state.abbr] ?? { dem: 0.49, rep: 0.49, ind: 0.02 },
+    })) as StateVotes[];
+  }, [nonDcStates, prEffectiveVotes]);
+
+  const hybridPRByState = useMemo(() => {
+    return runHybridPRByState({
+      parties: DEFAULT_PARTIES,
+      states: prStateVoteList,
+      stateSeats: prStateSeatMap,
+      settings: prSettings,
+      districtOverrides: districtProfileParsed.overrides,
+    });
+  }, [prStateVoteList, prStateSeatMap, prSettings, districtProfileParsed.overrides]);
+
+  const hybridPRNational = useMemo(
+    () => summarizeNationalPR(hybridPRByState, DEFAULT_PARTIES),
+    [hybridPRByState]
+  );
+
   const handleReset = () => {
     setTotalSeats(DEFAULT_TOTAL);
     setHouseModel(DEFAULT_HOUSE_MODEL);
+    setElectionSystem("apportionment");
     setDarkMode(true);
     setOverlaysEnabled(false);
     setVoteShareScenario(DEFAULT_SCENARIO);
     setResponsiveness(DEFAULT_RESPONSIVENESS);
     setIndependentShare(DEFAULT_INDEPENDENT_SHARE);
+    setPrInputPath("statewide");
+    setPrSettings(DEFAULT_PR_SETTINGS);
+    setNationalSwing(0);
+    setPrStateVotes(buildDefaultPRVotes(stateData));
+    setProfileStateCode("CA");
+    setProfileJsonText("");
     setPartyShares(parsePartyShares(null, stateData));
     setSelectedState(null);
   };
@@ -500,6 +673,42 @@ export default function Home() {
             overlays simulate vote-to-seat translations as teaching tools, not
             forecasts.
           </p>
+          <div className="card max-w-4xl space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="label">Election system</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Switch between apportionment-only outputs and a Hybrid PR
+                  election simulation layered on the same state apportionment.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className={`button ${
+                    electionSystem === "apportionment" ? "button-primary" : ""
+                  }`}
+                  onClick={() => setElectionSystem("apportionment")}
+                >
+                  Apportionment (House size)
+                </button>
+                <button
+                  type="button"
+                  className={`button ${
+                    electionSystem === "hybridPR" ? "button-primary" : ""
+                  }`}
+                  onClick={() => setElectionSystem("hybridPR")}
+                >
+                  Hybrid PR (MMD + STV + top-up)
+                </button>
+              </div>
+            </div>
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/40 dark:text-amber-100">
+              Single-member House districts are mandated by federal statute (2
+              U.S.C. 2c), not explicitly by constitutional text. This PR mode is
+              a policy simulation of what could be possible if federal law changed.
+            </div>
+          </div>
         </header>
 
         <USMap
@@ -526,7 +735,8 @@ export default function Home() {
             onShare={handleShare}
           />
 
-          <div className="grid auto-rows-min gap-6 xl:grid-cols-2">
+          {electionSystem === "apportionment" ? (
+            <div className="grid auto-rows-min gap-6 xl:grid-cols-2">
             <div className="card xl:col-span-2">
               <p className="label">National totals</p>
               <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -795,10 +1005,19 @@ export default function Home() {
               </div>
             </div>
 
-          </div>
+            </div>
+          ) : (
+            <div className="card">
+              <p className="label">Hybrid PR mode active</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                House size and apportionment model controls remain active on the left.
+                Hybrid PR controls and results are shown below.
+              </p>
+            </div>
+          )}
         </div>
 
-        {overlaysEnabled && (
+        {electionSystem === "apportionment" && overlaysEnabled && (
           <div className="mt-6 card space-y-4">
             <div>
               <p className="label">Seat-vote deviation by model</p>
@@ -872,8 +1091,8 @@ export default function Home() {
           </div>
         )}
 
-        <div className="mt-10">
-          {overlaysEnabled && (
+        {electionSystem === "apportionment" && overlaysEnabled && (
+          <div className="mt-10">
             <div className="card space-y-5">
               <div>
                 <p className="label">Independent baseline</p>
@@ -985,8 +1204,381 @@ export default function Home() {
                 </div>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
+
+        {electionSystem === "hybridPR" && (
+          <div className="mt-10 space-y-6">
+            <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+              <div className="card space-y-5">
+                <div>
+                  <p className="label">Hybrid PR controls</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Preserve current state apportionment, then simulate MMD + STV
+                    seat election with optional top-up seats.
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  <p className="text-sm font-semibold">Input path</p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className={`button ${
+                        prInputPath === "statewide" ? "button-primary" : ""
+                      }`}
+                      onClick={() => setPrInputPath("statewide")}
+                    >
+                      Statewide vote shares
+                    </button>
+                    <button
+                      type="button"
+                      className={`button ${
+                        prInputPath === "districtProfiles" ? "button-primary" : ""
+                      }`}
+                      onClick={() => setPrInputPath("districtProfiles")}
+                    >
+                      District vote profiles (advanced)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span>District seat target</span>
+                      <span className="font-semibold">{prSettings.districtSeatTarget}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={3}
+                      max={7}
+                      value={prSettings.districtSeatTarget}
+                      onChange={(event) =>
+                        setPrSettings((prev) => ({
+                          ...prev,
+                          districtSeatTarget: Number(event.target.value),
+                          minDistrictSeats: 3,
+                          maxDistrictSeats: 7,
+                        }))
+                      }
+                      className="mt-2 h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 dark:bg-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-semibold">
+                      <input
+                        type="checkbox"
+                        checked={prSettings.useTopUp}
+                        onChange={(event) =>
+                          setPrSettings((prev) => ({
+                            ...prev,
+                            useTopUp: event.target.checked,
+                          }))
+                        }
+                      />
+                      Use top-up seats
+                    </label>
+                    <div className="mt-2 flex items-center gap-3">
+                      <input
+                        type="range"
+                        min={0}
+                        max={30}
+                        value={Math.round(prSettings.topUpSeatShare * 100)}
+                        disabled={!prSettings.useTopUp}
+                        onChange={(event) =>
+                          setPrSettings((prev) => ({
+                            ...prev,
+                            topUpSeatShare: Number(event.target.value) / 100,
+                          }))
+                        }
+                        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 disabled:cursor-not-allowed dark:bg-slate-800"
+                      />
+                      <span className="w-12 text-right text-sm font-semibold">
+                        {Math.round(prSettings.topUpSeatShare * 100)}%
+                      </span>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span>National swing (D vs R)</span>
+                      <span className="font-semibold">
+                        {nationalSwing >= 0 ? "+" : ""}
+                        {Math.round(nationalSwing * 100)} pts
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-15}
+                      max={15}
+                      value={Math.round(nationalSwing * 100)}
+                      onChange={(event) => setNationalSwing(Number(event.target.value) / 100)}
+                      className="mt-2 h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 dark:bg-slate-800"
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="text-sm">
+                      <span className="text-slate-500 dark:text-slate-400">
+                        Ballots per seat
+                      </span>
+                      <input
+                        type="number"
+                        min={200}
+                        step={100}
+                        value={prSettings.stvBallotsPerSeat}
+                        onChange={(event) =>
+                          setPrSettings((prev) => ({
+                            ...prev,
+                            stvBallotsPerSeat: Math.max(100, parseNumber(event.target.value)),
+                          }))
+                        }
+                        className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                      />
+                    </label>
+                    <label className="text-sm">
+                      <span className="text-slate-500 dark:text-slate-400">Random seed</span>
+                      <input
+                        type="number"
+                        step={1}
+                        value={prSettings.randomSeed}
+                        onChange={(event) =>
+                          setPrSettings((prev) => ({
+                            ...prev,
+                            randomSeed: Math.round(parseNumber(event.target.value)),
+                          }))
+                        }
+                        className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card space-y-4">
+                <details open className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                  <summary className="cursor-pointer text-sm font-semibold">
+                    Explain this model
+                  </summary>
+                  <ul className="mt-3 space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                    <li>
+                      - Multi-member districts reduce winner-take-all outcomes by
+                      electing several representatives together.
+                    </li>
+                    <li>
+                      - STV uses ranked ballots and the Droop quota to elect multiple
+                      winners proportionally.
+                    </li>
+                    <li>
+                      - Optional top-up seats correct residual distortion between vote
+                      share and seat share within each state.
+                    </li>
+                  </ul>
+                </details>
+                <details className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                  <summary className="cursor-pointer text-sm font-semibold">
+                    Assumptions &amp; limits
+                  </summary>
+                  <ul className="mt-3 space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                    <li>- Ballots are synthetic unless district-level profiles are supplied.</li>
+                    <li>- No geographic clustering or incumbency effects are modeled.</li>
+                    <li>- Results are deterministic for a fixed random seed.</li>
+                  </ul>
+                </details>
+                {prInputPath === "districtProfiles" && (
+                  <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                    <p className="text-sm font-semibold">District profile editor</p>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      JSON array rows: {"{"}&quot;districtId&quot;,&quot;seats&quot;,&quot;dem&quot;,&quot;rep&quot;,&quot;ind&quot;{"}"}.
+                    </p>
+                    <div className="mt-2 flex items-center gap-2">
+                      <label className="text-xs text-slate-500 dark:text-slate-400">
+                        State
+                      </label>
+                      <select
+                        value={profileStateCode}
+                        onChange={(event) => setProfileStateCode(event.target.value)}
+                        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                      >
+                        {nonDcStates.map((state) => (
+                          <option key={state.abbr} value={state.abbr}>
+                            {state.abbr}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <textarea
+                      value={profileJsonText}
+                      onChange={(event) => setProfileJsonText(event.target.value)}
+                      className="mt-2 h-32 w-full rounded-md border border-slate-300 bg-white px-2 py-1 font-mono text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                      placeholder='[{"districtId":"CA-1","seats":5,"dem":0.52,"rep":0.44,"ind":0.04}]'
+                    />
+                    {districtProfileParsed.error && (
+                      <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                        {districtProfileParsed.error}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="card space-y-4">
+              <p className="label">Per-state party vote shares (Path 1)</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Edit Democratic/Republican/Independent statewide shares. Values are
+                normalized per state.
+              </p>
+              <div className="max-h-[360px] space-y-3 overflow-auto pr-2">
+                {nonDcStates.map((state) => {
+                  const shares = prEffectiveVotes[state.abbr] ?? {
+                    dem: 0.49,
+                    rep: 0.49,
+                    ind: 0.02,
+                  };
+                  return (
+                    <div key={state.abbr} className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                      <div className="mb-2 flex items-center justify-between">
+                        <p className="text-sm font-semibold">
+                          {state.state} ({state.abbr})
+                        </p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          D {Math.round(shares.dem * 100)} / R {Math.round(shares.rep * 100)} / I{" "}
+                          {Math.round(shares.ind * 100)}
+                        </p>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-3">
+                        {(["dem", "rep", "ind"] as const).map((partyId) => (
+                          <label key={partyId} className="text-xs">
+                            <span className="uppercase text-slate-500 dark:text-slate-400">
+                              {partyId}
+                            </span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={Math.round((prStateVotes[state.abbr]?.[partyId] ?? shares[partyId]) * 100)}
+                              onChange={(event) => {
+                                const raw = clampPercent(parseNumber(event.target.value)) / 100;
+                                setPrStateVotes((prev) => {
+                                  const base = prev[state.abbr] ?? shares;
+                                  const next = normalizeShares(
+                                    { ...base, [partyId]: raw },
+                                    ["dem", "rep", "ind"]
+                                  );
+                                  return { ...prev, [state.abbr]: next };
+                                });
+                              }}
+                              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="card">
+                <p className="label">National totals by party</p>
+                <div className="mt-4 space-y-3">
+                  {DEFAULT_PARTIES.map((party) => (
+                    <div key={party.id}>
+                      <div className="flex items-center justify-between text-sm">
+                        <span>{party.name}</span>
+                        <span className="font-semibold">
+                          {hybridPRNational.totalSeatsByParty[party.id] ?? 0} seats (
+                          {Math.round((hybridPRNational.totalVotesByParty[party.id] ?? 0) * 100)}%
+                          votes)
+                        </span>
+                      </div>
+                      <div className="mt-1 h-2 w-full rounded-full bg-slate-100 dark:bg-slate-800">
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${
+                              ((hybridPRNational.totalSeatsByParty[party.id] ?? 0) /
+                                Math.max(1, totals.house)) *
+                              100
+                            }%`,
+                            backgroundColor: party.color ?? "#64748b",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="card">
+                <p className="label">Disproportionality metrics</p>
+                <div className="mt-4 space-y-3 text-sm">
+                  <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                    <p className="text-slate-500 dark:text-slate-400">Gallagher index (national)</p>
+                    <p className="text-xl font-semibold">
+                      {formatNumber(hybridPRNational.gallagher * 100, 2)}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                    <p className="text-slate-500 dark:text-slate-400">
+                      Wasted votes proxy (national)
+                    </p>
+                    <p className="text-xl font-semibold">
+                      {formatNumber(hybridPRNational.wastedVotesProxy * 100, 2)}%
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      Proxy = 1 - effective represented vote share.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card space-y-4">
+              <p className="label">By-state seat breakdown</p>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="text-left text-slate-500 dark:text-slate-400">
+                    <tr>
+                      <th className="px-2 py-2 font-medium">State</th>
+                      <th className="px-2 py-2 font-medium">Seats</th>
+                      <th className="px-2 py-2 font-medium">District seats (D/R/I)</th>
+                      <th className="px-2 py-2 font-medium">Final seats (D/R/I)</th>
+                      <th className="px-2 py-2 font-medium">Top-up</th>
+                      <th className="px-2 py-2 font-medium">Gallagher</th>
+                      <th className="px-2 py-2 font-medium">Wasted proxy</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {hybridPRByState.map((state) => (
+                      <tr
+                        key={state.stateCode}
+                        className="border-t border-slate-200 dark:border-slate-800"
+                      >
+                        <td className="px-2 py-2 font-semibold">{state.stateCode}</td>
+                        <td className="px-2 py-2">{state.totalSeats}</td>
+                        <td className="px-2 py-2">
+                          {state.districtSeatsByParty.dem ?? 0}/
+                          {state.districtSeatsByParty.rep ?? 0}/
+                          {state.districtSeatsByParty.ind ?? 0}
+                        </td>
+                        <td className="px-2 py-2">
+                          {state.finalSeatsByParty.dem ?? 0}/{state.finalSeatsByParty.rep ?? 0}/
+                          {state.finalSeatsByParty.ind ?? 0}
+                        </td>
+                        <td className="px-2 py-2">{state.topUpSeats}</td>
+                        <td className="px-2 py-2">{formatNumber(state.gallagher * 100, 2)}</td>
+                        <td className="px-2 py-2">
+                          {formatNumber(state.wastedVotesProxy * 100, 2)}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="mt-10">
           <StateTable rows={metrics} onSelectState={setSelectedState} />

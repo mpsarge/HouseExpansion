@@ -60,6 +60,50 @@ The overlay modes are **explicitly simulations, not predictions**. They do not d
    - Applies a responsiveness factor to statewide vote share (low/medium/high).
    - The placeholder function is simple and documented in the same module.
 
+## Hybrid PR mode (MMD + STV + optional top-up)
+
+The app also includes a second election-system mode:
+
+1. **Apportionment (House size)**: existing behavior (state seat apportionment and overlays).
+2. **Hybrid PR**: keeps state apportionment fixed, then simulates how seats are elected:
+   - Multi-member district heuristic (target 3-7 seats per district where feasible)
+   - STV counting with ranked ballots and Droop quota
+   - Optional state-level top-up seats to reduce vote-seat distortion
+
+### Inputs
+
+1. **Statewide vote shares (default)** per state for `dem/rep/ind`.
+2. **District vote profiles (advanced)** via JSON for a selected state.
+
+Additional controls:
+
+1. District seat target
+2. Top-up toggle + top-up share
+3. National D-vs-R swing
+4. Ballots-per-seat (performance/precision tradeoff)
+5. Random seed (deterministic reproducibility)
+
+### Metrics
+
+1. National and state seat totals by party
+2. Gallagher Index (national and by state)
+3. Wasted-votes proxy: `1 - effective represented vote share`
+
+### Assumptions and limits
+
+1. Ranked ballots are synthetic unless district profiles are supplied.
+2. No geographic clustering or incumbency effects are modeled.
+3. This is a policy simulation, not a forecast.
+
+Hybrid PR implementation modules:
+
+1. [`/lib/pr/districtPlan.ts`](./lib/pr/districtPlan.ts)
+2. [`/lib/pr/ballotGenerator.ts`](./lib/pr/ballotGenerator.ts)
+3. [`/lib/pr/stv.ts`](./lib/pr/stv.ts)
+4. [`/lib/pr/topup.ts`](./lib/pr/topup.ts)
+5. [`/lib/pr/metrics.ts`](./lib/pr/metrics.ts)
+6. [`/lib/pr/simulate.ts`](./lib/pr/simulate.ts)
+
 ## Replacing population data
 
 Population data lives in [`/data/populations.json`](./data/populations.json) with the format:
