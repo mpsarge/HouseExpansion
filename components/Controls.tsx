@@ -123,6 +123,20 @@ export default function Controls({
             {overlaysEnabled ? "On" : "Off"}
           </button>
         </div>
+        <div className="rounded-xl border border-slate-200 p-4 text-sm text-slate-500 dark:border-slate-800 dark:text-slate-400">
+          <p>
+            Compare baseline outcomes, larger House-size scenarios, and vote-to-seat
+            translation assumptions.
+          </p>
+          <ul className="mt-3 space-y-2 text-slate-600 dark:text-slate-300">
+            <li>- Proportional-by-statewide-vote overlay (Hamilton method).</li>
+            <li>
+              - Seat-vote responsiveness overlay (low/medium/high), a simulated
+              amplification lens rather than a gerrymandering score.
+            </li>
+            <li>- Results are simulations, not forecasts.</li>
+          </ul>
+        </div>
         <div className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
           <p className="font-semibold text-slate-700 dark:text-slate-200">
             Seat-vote curve responsiveness
