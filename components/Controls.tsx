@@ -128,7 +128,8 @@ export default function Controls({
             Seat-vote curve responsiveness
           </p>
           <p className="mt-1">
-            Placeholder curve applied to each state&apos;s Party A vote share.
+            Simulated vote-to-seat amplification. Useful for comparing
+            responsiveness effects, but not a direct measure of gerrymandering.
           </p>
           <div className="mt-3 flex gap-2">
             {(["low", "medium", "high"] as const).map((option) => (

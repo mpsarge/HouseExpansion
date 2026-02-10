@@ -763,7 +763,9 @@ export default function Home() {
                   <p className="label">Simulation overlays</p>
                   <p className="text-sm text-slate-500 dark:text-slate-400">
                     These overlays are illustrative simulations. They do not predict
-                    election outcomes and do not depend on district geometry.
+                    election outcomes. The seat-vote curve is a stylized
+                    responsiveness model, not a direct estimate of
+                    gerrymandering.
                   </p>
                 </div>
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -784,7 +786,8 @@ export default function Home() {
                   <div className="rounded-xl border border-slate-200 p-4 dark:border-slate-800">
                     <p className="text-sm font-semibold">Seat-vote curve</p>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Vote share adjusted by responsiveness: {responsiveness}.
+                      Statewide vote share translated through a responsiveness
+                      curve ({responsiveness}) to illustrate seat amplification.
                     </p>
                     <div className="mt-3 flex justify-between text-sm">
                       <span>Democrats</span>
@@ -918,8 +921,8 @@ export default function Home() {
             <div className="card">
               <p className="label">Simulation overlays</p>
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                Turn on overlays to explore proportional and seat-vote curve
-                simulations.
+                Turn on overlays to compare baseline outcomes, larger House-size
+                scenarios, and vote-to-seat translation assumptions.
               </p>
               <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
                 Current independent baseline for map partisan splits: {" "}
@@ -929,7 +932,11 @@ export default function Home() {
               </p>
               <ul className="mt-4 space-y-3 text-sm text-slate-600 dark:text-slate-300">
                 <li>- Proportional-by-statewide-vote overlay (Hamilton method).</li>
-                <li>- Seat-vote curve overlay (low/medium/high responsiveness).</li>
+                <li>
+                  - Seat-vote responsiveness overlay (low/medium/high), a
+                  simulated amplification lens rather than a gerrymandering
+                  score.
+                </li>
                 <li>- Results are explicitly simulations, not forecasts.</li>
               </ul>
             </div>
