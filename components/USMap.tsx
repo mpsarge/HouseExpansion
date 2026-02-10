@@ -6,7 +6,6 @@ import * as d3 from "d3";
 import * as topojson from "topojson-client";
 import type { FeatureCollection, Feature, GeoJsonObject } from "geojson";
 import type { GeometryCollection, Topology } from "topojson-specification";
-import type { MetricKey } from "@/components/Controls";
 import type { StateMetrics, StatePopulation } from "@/lib/metrics";
 import populations from "@/data/populations.json";
 
@@ -15,14 +14,6 @@ const DISTRICTS_GEOJSON_URL = process.env.NEXT_PUBLIC_DISTRICTS_GEOJSON_URL;
 const PRECINCTS_GEOJSON_TEMPLATE =
   process.env.NEXT_PUBLIC_PRECINCTS_GEOJSON_TEMPLATE;
 
-const metricAccessor = (metric: MetricKey, data: StateMetrics) => {
-  if (metric === "house") return data.houseSeats;
-  if (metric === "ec") return data.ecVotes;
-  if (metric === "houseDelta") return data.houseDelta;
-  if (metric === "ecDelta") return data.ecDelta;
-  return data.ecPerMillion;
-};
-
 type USMapProps = {
   metricsByState: Record<string, StateMetrics>;
   democraticShareByState?: Record<string, number>;
@@ -30,7 +21,6 @@ type USMapProps = {
     string,
     { democrats: number; republicans: number; independents: number }
   >;
-  metric: MetricKey;
   selectedState?: string | null;
   onSelectState: (abbr: string) => void;
 };
@@ -66,6 +56,14 @@ const FORCE_CALLOUT_STATES = new Set([
   "VT",
 ]);
 
+const LABEL_ANCHOR_OVERRIDES: Partial<Record<string, [number, number]>> = {
+  // Relative anchor inside state bounds [xFraction, yFraction].
+  // These states have irregular geometry where pure centroid looks off-center.
+  MI: [0.656, 0.67],
+  LA: [0.336, 0.56],
+  FL: [0.746, 0.37],
+};
+
 const toFeatureCollection = (geo: GeoJsonObject): FeatureCollection | null => {
   if (geo.type === "FeatureCollection") {
     return geo as FeatureCollection;
@@ -80,7 +78,6 @@ export default function USMap({
   metricsByState,
   democraticShareByState,
   partisanByState,
-  metric,
   selectedState,
   onSelectState,
 }: USMapProps) {
@@ -284,11 +281,18 @@ export default function USMap({
       const data = metricsByState[abbr];
       if (!data) return;
 
+      const bounds = path.bounds(feature);
       const centroid = path.centroid(feature);
       if (!Number.isFinite(centroid[0]) || !Number.isFinite(centroid[1])) {
         return;
       }
-      const bounds = path.bounds(feature);
+      const override = LABEL_ANCHOR_OVERRIDES[abbr];
+      const anchorX = override
+        ? bounds[0][0] + (bounds[1][0] - bounds[0][0]) * override[0]
+        : centroid[0];
+      const anchorY = override
+        ? bounds[0][1] + (bounds[1][1] - bounds[0][1]) * override[1]
+        : centroid[1];
       const featureWidth = bounds[1][0] - bounds[0][0];
       const featureHeight = bounds[1][1] - bounds[0][1];
       const featureArea = featureWidth * featureHeight;
@@ -304,16 +308,16 @@ export default function USMap({
           abbr,
           value,
           x: Math.min(width - 20, bounds[1][0] + 16),
-          y: Math.max(16, Math.min(height - 16, centroid[1])),
-          anchorX: centroid[0],
-          anchorY: centroid[1],
+          y: Math.max(16, Math.min(height - 16, anchorY)),
+          anchorX,
+          anchorY,
         });
       } else {
         inline.push({
           abbr,
           value,
-          x: centroid[0],
-          y: centroid[1],
+          x: anchorX,
+          y: anchorY,
         });
       }
     });
@@ -613,15 +617,12 @@ export default function USMap({
           style={{ left: tooltip.x + 12, top: tooltip.y - 12 }}
         >
           <p className="font-semibold">{metricsByState[hovered].state}</p>
+          <p>House: {metricsByState[hovered].houseSeats}</p>
+          <p>Delta House: {metricsByState[hovered].houseDelta}</p>
+          <p>EC: {metricsByState[hovered].ecVotes}</p>
+          <p>Delta EC: {metricsByState[hovered].ecDelta}</p>
           <p>
-            {metric === "house" && "House"}
-            {metric === "houseDelta" && "Delta House"}
-            {metric === "ec" && "EC"}
-            {metric === "ecDelta" && "Delta EC"}
-            {metric === "ecPerMillion" && "EC / M"}: {" "}
-            {metricAccessor(metric, metricsByState[hovered]).toFixed(
-              metric === "ecPerMillion" ? 2 : 0
-            )}
+            EC / M: {metricsByState[hovered].ecPerMillion.toFixed(2)}
           </p>
           <p>
             Category:{" "}

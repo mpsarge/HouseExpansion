@@ -1,17 +1,12 @@
 "use client";
 
-import { useMemo } from "react";
 import { houseModelLabel, type HouseModelKey } from "@/lib/houseModels";
-
-export type MetricKey = "house" | "houseDelta" | "ec" | "ecDelta" | "ecPerMillion";
 
 type ControlsProps = {
   totalSeats: number;
   onTotalSeatsChange: (value: number) => void;
   houseModel: HouseModelKey;
   onHouseModelChange: (value: HouseModelKey) => void;
-  metric: MetricKey;
-  onMetricChange: (metric: MetricKey) => void;
   darkMode: boolean;
   onToggleDarkMode: () => void;
   overlaysEnabled: boolean;
@@ -21,26 +16,6 @@ type ControlsProps = {
   onReset: () => void;
   onShare: () => void;
 };
-
-const metrics: { key: MetricKey; label: string; description: string }[] = [
-  { key: "house", label: "House seats", description: "Total House seats at N" },
-  {
-    key: "houseDelta",
-    label: "House change vs 435",
-    description: "Seat gains/losses vs baseline",
-  },
-  { key: "ec", label: "Electoral College", description: "House seats + 2" },
-  {
-    key: "ecDelta",
-    label: "EC change vs 435",
-    description: "Electoral College shift vs baseline",
-  },
-  {
-    key: "ecPerMillion",
-    label: "EC per million",
-    description: "Electoral College votes per million residents",
-  },
-];
 
 const modelOptions: HouseModelKey[] = [
   "manual",
@@ -54,8 +29,6 @@ export default function Controls({
   onTotalSeatsChange,
   houseModel,
   onHouseModelChange,
-  metric,
-  onMetricChange,
   darkMode,
   onToggleDarkMode,
   overlaysEnabled,
@@ -67,10 +40,6 @@ export default function Controls({
 }: ControlsProps) {
   const min = 435;
   const max = 1200;
-  const metricDescription = useMemo(
-    () => metrics.find((option) => option.key === metric)?.description,
-    [metric]
-  );
 
   return (
     <div className="card space-y-6">
@@ -138,29 +107,6 @@ export default function Controls({
         )}
       </div>
 
-      <div>
-        <p className="label">Map + table metric</p>
-        <div className="mt-2 grid gap-2 sm:grid-cols-2">
-          {metrics.map((option) => (
-            <button
-              type="button"
-              key={option.key}
-              className={`button w-full justify-start ${
-                metric === option.key ? "button-primary" : ""
-              }`}
-              onClick={() => onMetricChange(option.key)}
-            >
-              <span className="text-sm font-semibold">{option.label}</span>
-            </button>
-          ))}
-        </div>
-        {metricDescription && (
-          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-            {metricDescription}
-          </p>
-        )}
-      </div>
-
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div>
@@ -203,4 +149,3 @@ export default function Controls({
     </div>
   );
 }
-

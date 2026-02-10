@@ -1,41 +1,20 @@
 "use client";
 
 import type { StateMetrics } from "@/lib/metrics";
-import type { MetricKey } from "@/components/Controls";
 import { formatNumber } from "@/lib/metrics";
-
-const metricLabels: Record<MetricKey, string> = {
-  house: "House",
-  houseDelta: "Delta House",
-  ec: "EC",
-  ecDelta: "Delta EC",
-  ecPerMillion: "EC / M",
-};
 
 type StateTableProps = {
   rows: StateMetrics[];
-  metric: MetricKey;
   onSelectState: (abbr: string) => void;
-};
-
-const metricValue = (row: StateMetrics, metric: MetricKey) => {
-  if (metric === "house") return row.houseSeats;
-  if (metric === "ec") return row.ecVotes;
-  if (metric === "houseDelta") return row.houseDelta;
-  if (metric === "ecDelta") return row.ecDelta;
-  return row.ecPerMillion;
 };
 
 export default function StateTable({
   rows,
-  metric,
   onSelectState,
 }: StateTableProps) {
   const sorted = [...rows].sort((a, b) => {
-    const valueA = metricValue(a, metric);
-    const valueB = metricValue(b, metric);
-    if (valueA === valueB) return a.state.localeCompare(b.state);
-    return valueB - valueA;
+    if (a.houseSeats === b.houseSeats) return a.state.localeCompare(b.state);
+    return b.houseSeats - a.houseSeats;
   });
 
   return (
@@ -43,7 +22,7 @@ export default function StateTable({
       <div className="flex items-center justify-between">
         <div>
           <p className="label">State table</p>
-          <h3 className="text-lg font-semibold">Sorted by {metricLabels[metric]}</h3>
+          <h3 className="text-lg font-semibold">Sorted by House seats</h3>
         </div>
       </div>
       <div className="mt-4 overflow-auto">
@@ -83,4 +62,3 @@ export default function StateTable({
     </div>
   );
 }
-

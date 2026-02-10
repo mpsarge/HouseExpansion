@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import Controls, { type MetricKey } from "@/components/Controls";
+import Controls from "@/components/Controls";
 import USMap from "@/components/USMap";
 import StateTable from "@/components/StateTable";
 import populations from "@/data/populations.json";
@@ -30,7 +30,6 @@ import {
 } from "@/lib/elections";
 
 const DEFAULT_TOTAL = 435;
-const DEFAULT_METRIC: MetricKey = "house";
 const DEFAULT_RESPONSIVENESS: "low" | "medium" | "high" = "medium";
 const DEFAULT_INDEPENDENT_SHARE = 0.02;
 const DEFAULT_HOUSE_MODEL: HouseModelKey = "manual";
@@ -134,7 +133,6 @@ export default function Home() {
 
   const [totalSeats, setTotalSeats] = useState(DEFAULT_TOTAL);
   const [houseModel, setHouseModel] = useState<HouseModelKey>(DEFAULT_HOUSE_MODEL);
-  const [metric, setMetric] = useState<MetricKey>(DEFAULT_METRIC);
   const [darkMode, setDarkMode] = useState(true);
   const [overlaysEnabled, setOverlaysEnabled] = useState(false);
   const [responsiveness, setResponsiveness] = useState(DEFAULT_RESPONSIVENESS);
@@ -158,7 +156,6 @@ export default function Home() {
   useEffect(() => {
     const querySeats = Number(searchParams.get("N"));
     const queryHouseModel = searchParams.get("hm") as HouseModelKey | null;
-    const queryMetric = searchParams.get("metric") as MetricKey | null;
     const queryOverlays = searchParams.get("overlays");
     const queryScenario = searchParams.get("scenario") as
       | VoteShareScenarioKey
@@ -180,14 +177,6 @@ export default function Home() {
       )
     ) {
       setHouseModel(queryHouseModel);
-    }
-    if (
-      queryMetric &&
-      ["house", "houseDelta", "ec", "ecDelta", "ecPerMillion"].includes(
-        queryMetric
-      )
-    ) {
-      setMetric(queryMetric);
     }
     if (queryOverlays) {
       setOverlaysEnabled(queryOverlays === "1");
@@ -234,7 +223,6 @@ export default function Home() {
     const params = new URLSearchParams();
     params.set("N", String(totalSeats));
     params.set("hm", houseModel);
-    params.set("metric", metric);
     params.set("overlays", overlaysEnabled ? "1" : "0");
     params.set("scenario", voteShareScenario);
     params.set("resp", responsiveness);
@@ -247,7 +235,6 @@ export default function Home() {
   }, [
     totalSeats,
     houseModel,
-    metric,
     overlaysEnabled,
     voteShareScenario,
     responsiveness,
@@ -451,7 +438,6 @@ export default function Home() {
   const handleReset = () => {
     setTotalSeats(DEFAULT_TOTAL);
     setHouseModel(DEFAULT_HOUSE_MODEL);
-    setMetric(DEFAULT_METRIC);
     setDarkMode(true);
     setOverlaysEnabled(false);
     setVoteShareScenario(DEFAULT_SCENARIO);
@@ -488,7 +474,6 @@ export default function Home() {
           metricsByState={metricsByState}
           democraticShareByState={partyShares}
           partisanByState={partisanByState}
-          metric={metric}
           selectedState={selectedState}
           onSelectState={setSelectedState}
         />
@@ -499,8 +484,6 @@ export default function Home() {
             onTotalSeatsChange={setTotalSeats}
             houseModel={houseModel}
             onHouseModelChange={setHouseModel}
-            metric={metric}
-            onMetricChange={setMetric}
             darkMode={darkMode}
             onToggleDarkMode={() => setDarkMode((prev) => !prev)}
             overlaysEnabled={overlaysEnabled}
@@ -954,7 +937,7 @@ export default function Home() {
         </div>
 
         <div className="mt-10">
-          <StateTable rows={metrics} metric={metric} onSelectState={setSelectedState} />
+          <StateTable rows={metrics} onSelectState={setSelectedState} />
         </div>
       </div>
     </main>
