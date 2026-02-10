@@ -112,11 +112,19 @@ const parseNumber = (value: string) => {
   return Number.isFinite(num) ? num : 0;
 };
 
-const buildDefaultPRVotes = (states: StatePopulation[]) => {
+const buildDefaultPRVotes = (
+  states: StatePopulation[],
+  historicalRanges: Record<string, HistoricalRange>
+) => {
   const out: Record<string, Record<string, number>> = {};
   states.forEach((state) => {
     if (state.abbr === "DC") return;
-    out[state.abbr] = { dem: 0.49, rep: 0.49, ind: 0.02 };
+    const center = historicalRanges[state.abbr]?.center ?? 0.5;
+    const ind = 0.02;
+    out[state.abbr] = normalizeShares(
+      { dem: center, rep: Math.max(0, 1 - center - ind), ind },
+      ["dem", "rep", "ind"]
+    );
   });
   return out;
 };
@@ -157,6 +165,38 @@ const midtermPresetShares = (
   return next;
 };
 
+type HistoricalRange = {
+  low: number;
+  high: number;
+  center: number;
+  sampleSize: number;
+};
+
+const historicalDemRangeByState = (states: StatePopulation[]) => {
+  const map: Record<string, HistoricalRange> = {};
+  const years: Array<"2014" | "2018" | "2022"> = ["2014", "2018", "2022"];
+
+  states.forEach((state) => {
+    if (state.abbr === "DC") return;
+    const samples = years
+      .map((year) => midtermHouseDemShareByYear[year][state.abbr])
+      .filter((value): value is number => typeof value === "number" && value > 0)
+      .sort((a, b) => a - b);
+
+    if (samples.length === 0) {
+      map[state.abbr] = { low: 0.45, high: 0.55, center: 0.5, sampleSize: 0 };
+      return;
+    }
+
+    const low = samples[0];
+    const high = samples[samples.length - 1];
+    const center = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+    map[state.abbr] = { low, high, center, sampleSize: samples.length };
+  });
+
+  return map;
+};
+
 export default function Home() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -177,6 +217,8 @@ export default function Home() {
   const [prInputPath, setPrInputPath] = useState<PRInputPath>("statewide");
   const [prSettings, setPrSettings] = useState<PRSettings>(DEFAULT_PR_SETTINGS);
   const [nationalSwing, setNationalSwing] = useState(0);
+  const [usePollingAdjustment, setUsePollingAdjustment] = useState(true);
+  const [pollingAdjustmentWeight, setPollingAdjustmentWeight] = useState(0.6);
   const [prStateVotes, setPrStateVotes] = useState<
     Record<string, Record<string, number>>
   >({});
@@ -193,6 +235,10 @@ export default function Home() {
   } | null>(null);
   const [pollingError, setPollingError] = useState<string | null>(null);
   const initializedPollingRef = useRef(false);
+  const historicalRanges = useMemo(
+    () => historicalDemRangeByState(stateData),
+    [stateData]
+  );
 
   useEffect(() => {
     const querySeats = Number(searchParams.get("N"));
@@ -254,7 +300,7 @@ export default function Home() {
 
   useEffect(() => {
     if (Object.keys(prStateVotes).length > 0) return;
-    const seeded = buildDefaultPRVotes(stateData);
+    const seeded = buildDefaultPRVotes(stateData, historicalRanges);
     stateData.forEach((state) => {
       if (state.abbr === "DC") return;
       const dem = partyShares[state.abbr] ?? 0.49;
@@ -263,7 +309,7 @@ export default function Home() {
       seeded[state.abbr] = normalizeShares({ dem, rep, ind }, ["dem", "rep", "ind"]);
     });
     setPrStateVotes(seeded);
-  }, [stateData, partyShares, independentShare, prStateVotes]);
+  }, [stateData, partyShares, independentShare, prStateVotes, historicalRanges]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -591,16 +637,33 @@ export default function Home() {
   const prEffectiveVotes = useMemo(() => {
     const output: Record<string, Record<string, number>> = {};
     nonDcStates.forEach((state) => {
-      const base = prStateVotes[state.abbr] ?? { dem: 0.49, rep: 0.49, ind: 0.02 };
+      const historicalCenter = historicalRanges[state.abbr]?.center ?? 0.5;
+      const base = prStateVotes[state.abbr] ?? {
+        dem: historicalCenter,
+        rep: Math.max(0, 0.98 - historicalCenter),
+        ind: 0.02,
+      };
+      const pollDem = clampShare(partyShares[state.abbr] ?? base.dem);
+      const blendedDem = usePollingAdjustment
+        ? base.dem * (1 - pollingAdjustmentWeight) + pollDem * pollingAdjustmentWeight
+        : base.dem;
       const swung = {
-        dem: Math.max(0, base.dem + nationalSwing),
+        dem: Math.max(0, blendedDem + nationalSwing),
         rep: Math.max(0, base.rep - nationalSwing),
         ind: Math.max(0, base.ind),
       };
       output[state.abbr] = normalizeShares(swung, ["dem", "rep", "ind"]);
     });
     return output;
-  }, [nonDcStates, prStateVotes, nationalSwing]);
+  }, [
+    nonDcStates,
+    prStateVotes,
+    nationalSwing,
+    usePollingAdjustment,
+    pollingAdjustmentWeight,
+    partyShares,
+    historicalRanges,
+  ]);
 
   const prStateSeatMap = useMemo(() => {
     const map: Record<string, number> = {};
@@ -645,7 +708,9 @@ export default function Home() {
     setPrInputPath("statewide");
     setPrSettings(DEFAULT_PR_SETTINGS);
     setNationalSwing(0);
-    setPrStateVotes(buildDefaultPRVotes(stateData));
+    setUsePollingAdjustment(true);
+    setPollingAdjustmentWeight(0.6);
+    setPrStateVotes(buildDefaultPRVotes(stateData, historicalRanges));
     setProfileStateCode("CA");
     setProfileJsonText("");
     setPartyShares(parsePartyShares(null, stateData));
@@ -719,7 +784,13 @@ export default function Home() {
           onSelectState={setSelectedState}
         />
 
-        <div className="mt-10 grid items-start gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+        <div
+          className={
+            electionSystem === "apportionment"
+              ? "mt-10 grid items-start gap-6 lg:grid-cols-[1.1fr_0.9fr]"
+              : "mt-10"
+          }
+        >
           <Controls
             totalSeats={totalSeats}
             onTotalSeatsChange={setTotalSeats}
@@ -735,7 +806,7 @@ export default function Home() {
             onShare={handleShare}
           />
 
-          {electionSystem === "apportionment" ? (
+          {electionSystem === "apportionment" && (
             <div className="grid auto-rows-min gap-6 xl:grid-cols-2">
             <div className="card xl:col-span-2">
               <p className="label">National totals</p>
@@ -1006,14 +1077,6 @@ export default function Home() {
             </div>
 
             </div>
-          ) : (
-            <div className="card">
-              <p className="label">Hybrid PR mode active</p>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                House size and apportionment model controls remain active on the left.
-                Hybrid PR controls and results are shown below.
-              </p>
-            </div>
           )}
         </div>
 
@@ -1214,8 +1277,8 @@ export default function Home() {
                 <div>
                   <p className="label">Hybrid PR controls</p>
                   <p className="text-sm text-slate-500 dark:text-slate-400">
-                    Preserve current state apportionment, then simulate MMD + STV
-                    seat election with optional top-up seats.
+                    Keep each state&apos;s number of House seats the same, then
+                    simulate a more proportional way those seats could be elected.
                   </p>
                 </div>
 
@@ -1243,7 +1306,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="space-y-4">
+                  <div className="space-y-4">
                   <div>
                     <div className="flex items-center justify-between text-sm">
                       <span>District seat target</span>
@@ -1264,6 +1327,10 @@ export default function Home() {
                       }
                       className="mt-2 h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 dark:bg-slate-800"
                     />
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      Higher values make each simulated district larger, which
+                      usually makes seat outcomes more proportional.
+                    </p>
                   </div>
                   <div>
                     <label className="flex items-center gap-2 text-sm font-semibold">
@@ -1298,6 +1365,10 @@ export default function Home() {
                         {Math.round(prSettings.topUpSeatShare * 100)}%
                       </span>
                     </div>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      Top-up seats are a correction layer to better align seat
+                      shares with statewide vote shares.
+                    </p>
                   </div>
                   <div>
                     <div className="flex items-center justify-between text-sm">
@@ -1315,6 +1386,40 @@ export default function Home() {
                       onChange={(event) => setNationalSwing(Number(event.target.value) / 100)}
                       className="mt-2 h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 dark:bg-slate-800"
                     />
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      Positive values boost Democrats in every state and reduce
+                      Republicans by the same amount (before normalization).
+                    </p>
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-semibold">
+                      <input
+                        type="checkbox"
+                        checked={usePollingAdjustment}
+                        onChange={(event) => setUsePollingAdjustment(event.target.checked)}
+                      />
+                      Use polling adjustment
+                    </label>
+                    <div className="mt-2 flex items-center gap-3">
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round(pollingAdjustmentWeight * 100)}
+                        disabled={!usePollingAdjustment}
+                        onChange={(event) =>
+                          setPollingAdjustmentWeight(Number(event.target.value) / 100)
+                        }
+                        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 disabled:cursor-not-allowed dark:bg-slate-800"
+                      />
+                      <span className="w-12 text-right text-sm font-semibold">
+                        {Math.round(pollingAdjustmentWeight * 100)}%
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      Blends each state&apos;s baseline with current statewide polling.
+                      0% = baseline only, 100% = polling only.
+                    </p>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <label className="text-sm">
@@ -1425,16 +1530,47 @@ export default function Home() {
             <div className="card space-y-4">
               <p className="label">Per-state party vote shares (Path 1)</p>
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                Edit Democratic/Republican/Independent statewide shares. Values are
-                normalized per state.
+                This is the starting assumption for each state&apos;s popular vote.
+                The simulator uses these percentages to generate synthetic ranked
+                ballots and then runs STV. Changing these numbers changes who wins
+                seats in that state.
               </p>
+              <div className="rounded-lg border border-slate-200 p-3 text-sm text-slate-600 dark:border-slate-800 dark:text-slate-300">
+                <p className="font-semibold">How to read and edit this box</p>
+                <ul className="mt-2 space-y-1">
+                  <li>- Increase a party in a state to test stronger local support.</li>
+                  <li>- Values auto-normalize to 100% per state.</li>
+                  <li>- National swing is applied on top of these base values.</li>
+                  <li>- Use this as a scenario builder, not a forecast.</li>
+                </ul>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  className="button"
+                  onClick={() => setPrStateVotes(buildDefaultPRVotes(stateData, historicalRanges))}
+                >
+                  Reset all states to historical centers
+                </button>
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  Historical range uses 2014, 2018, and 2022 state U.S. House vote shares.
+                </span>
+              </div>
               <div className="max-h-[360px] space-y-3 overflow-auto pr-2">
                 {nonDcStates.map((state) => {
+                  const historical = historicalRanges[state.abbr] ?? {
+                    low: 0.45,
+                    high: 0.55,
+                    center: 0.5,
+                    sampleSize: 0,
+                  };
                   const shares = prEffectiveVotes[state.abbr] ?? {
                     dem: 0.49,
                     rep: 0.49,
                     ind: 0.02,
                   };
+                  const inRange =
+                    shares.dem >= historical.low && shares.dem <= historical.high;
                   return (
                     <div key={state.abbr} className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
                       <div className="mb-2 flex items-center justify-between">
@@ -1446,6 +1582,21 @@ export default function Home() {
                           {Math.round(shares.ind * 100)}
                         </p>
                       </div>
+                      <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+                        Historical D range: {Math.round(historical.low * 100)}-
+                        {Math.round(historical.high * 100)} (center{" "}
+                        {Math.round(historical.center * 100)}). Current effective D is{" "}
+                        <span
+                          className={
+                            inRange
+                              ? "font-semibold text-emerald-600 dark:text-emerald-400"
+                              : "font-semibold text-amber-600 dark:text-amber-400"
+                          }
+                        >
+                          {inRange ? "within" : "outside"} range
+                        </span>
+                        .
+                      </p>
                       <div className="grid gap-2 sm:grid-cols-3">
                         {(["dem", "rep", "ind"] as const).map((partyId) => (
                           <label key={partyId} className="text-xs">
@@ -1511,12 +1662,20 @@ export default function Home() {
                 </div>
               </div>
               <div className="card">
-                <p className="label">Disproportionality metrics</p>
+                <p className="label">Fairness / proportionality metrics</p>
+                <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                  These help compare vote share vs seat share. Lower is generally
+                  more proportional.
+                </p>
                 <div className="mt-4 space-y-3 text-sm">
                   <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
                     <p className="text-slate-500 dark:text-slate-400">Gallagher index (national)</p>
                     <p className="text-xl font-semibold">
                       {formatNumber(hybridPRNational.gallagher * 100, 2)}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      A standard political-science score of mismatch between votes
+                      and seats. `0` means perfectly proportional.
                     </p>
                   </div>
                   <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
@@ -1527,7 +1686,8 @@ export default function Home() {
                       {formatNumber(hybridPRNational.wastedVotesProxy * 100, 2)}%
                     </p>
                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                      Proxy = 1 - effective represented vote share.
+                      Simple proxy: `1 - effective represented vote share`. Lower
+                      means fewer votes are left without proportional seat impact.
                     </p>
                   </div>
                 </div>
